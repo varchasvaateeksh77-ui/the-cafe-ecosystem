@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import QRCode from 'qrcode';
 import {
   calculateCartTotal,
   createInitialCafeState,
@@ -8,6 +9,7 @@ import {
   SUPABASE_PUBLISHABLE_KEY,
   FCM_VAPID_PUBLIC_KEY,
 } from './ecosystemStore';
+import { buildTableQrUrl } from '../components/TableQrGenerator';
 
 test('Cafe Ecosystem initializes with 12 tables, 10 dishes across 5 sub-sections, Supabase URL, publishable key, and FCM VAPID key', () => {
   const state = createInitialCafeState();
@@ -35,4 +37,12 @@ test('applyAdminDishPatch updates dish prices and 86 sold-out state across Guest
   assert.equal(after86.dishes[0].isAvailable, false);
   assert.equal(after86.cart.some((c) => c.dish.id === 'd-1'), false);
   assert.equal(calculateCartTotal(after86.cart), 490);
+});
+
+test('buildTableQrUrl and QRCode generate direct working table URLs and valid scannable SVG QR matrices', async () => {
+  const url = buildTableQrUrl('https://menu.buildbros.app/', 'roast-and-co', 7, 3);
+  assert.equal(url, 'https://menu.buildbros.app/?apk=guest&venue=roast-and-co&table=7&level=3');
+  const svg = await QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'H' });
+  assert.ok(svg.includes('<svg'));
+  assert.ok(svg.includes('<path'));
 });

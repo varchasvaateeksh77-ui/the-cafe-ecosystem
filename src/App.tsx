@@ -2,16 +2,15 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   CafeEcosystemState,
   DishItem,
-  FCM_VAPID_PUBLIC_KEY,
   PushNotificationEvent,
   SUPABASE_PROJECT_URL,
-  SUPABASE_PUBLISHABLE_KEY,
   ServiceLevel,
   applyAdminDishPatch,
   calculateCartTotal,
   createInitialCafeState,
   supabase,
 } from './lib/ecosystemStore';
+import { TableQrGenerator } from './components/TableQrGenerator';
 import { ThemeCataloguePage } from './catalogue/ThemeCataloguePage';
 import { LiveThemeInstance } from './catalogue/LiveThemeInstance';
 import { ThemeId } from './catalogue/themeCatalogData';
@@ -26,26 +25,43 @@ type ActiveWorkspaceView =
   | 'theme-catalogue'
   | 'live-theme';
 
-const GITHUB_REPO_URL = 'https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem';
-const GITHUB_RELEASES_URL = 'https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/releases/latest';
-const GITHUB_ACTIONS_URL = 'https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/actions';
+const DEDICATED_APK_ROLE = (import.meta as unknown as { env?: Record<string, string> })?.env
+  ?.VITE_DEFAULT_APK as 'waiter' | 'kitchen' | 'admin' | undefined;
 
 function getInitialViewFromUrl(): ActiveWorkspaceView {
-  const envApk = (import.meta as unknown as { env?: Record<string, string> })?.env
-    ?.VITE_DEFAULT_APK;
+  if (DEDICATED_APK_ROLE === 'waiter') return 'waiter-apk';
+  if (DEDICATED_APK_ROLE === 'kitchen') return 'kitchen-apk';
+  if (DEDICATED_APK_ROLE === 'admin') return 'admin-apk';
+
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
-    const apk = params.get('apk') || envApk;
+    const apk = params.get('apk');
     if (apk === 'waiter') return 'waiter-apk';
     if (apk === 'kitchen') return 'kitchen-apk';
     if (apk === 'admin') return 'admin-apk';
-    if (apk === 'guest') return 'guest-web';
+    if (apk === 'guest' || params.get('table')) return 'guest-web';
   }
   return 'split-suite';
 }
 
+function createHydratedInitialState(): CafeEcosystemState {
+  const base = createInitialCafeState();
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const tableParam = parseInt(params.get('table') || '', 10);
+    if (!Number.isNaN(tableParam) && tableParam >= 1 && tableParam <= 50) {
+      base.activeTable = tableParam;
+    }
+    const levelParam = parseInt(params.get('level') || '', 10);
+    if (levelParam === 1 || levelParam === 2 || levelParam === 3) {
+      base.serviceLevel = levelParam;
+    }
+  }
+  return base;
+}
+
 export default function App() {
-  const [state, setState] = useState<CafeEcosystemState>(() => createInitialCafeState());
+  const [state, setState] = useState<CafeEcosystemState>(() => createHydratedInitialState());
   const [view, setView] = useState<ActiveWorkspaceView>(() => getInitialViewFromUrl());
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [guestStep, setGuestStep] = useState<'deck' | 'cart'>('deck');
@@ -54,19 +70,22 @@ export default function App() {
   // Swipe Deck State for Surface 1 (Guest Web Menu)
   const [deckIndex, setDeckIndex] = useState<number>(0);
   const [skippedIds, setSkippedIds] = useState<string[]>([]);
-  const [swipeHistory, setSwipeHistory] = useState<Array<{ index: number; action: 'skip' | 'add'; dishId: string }>>([]);
+  const [swipeHistory, setSwipeHistory] = useState<
+    Array<{ index: number; action: 'skip' | 'add'; dishId: string }>
+  >([]);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [exitDirection, setExitDirection] = useState<'left' | 'right' | null>(null);
-  const [lastSwipeFeedback, setLastSwipeFeedback] = useState<{ type: 'skip' | 'add'; dishName: string } | null>(null);
+  const [lastSwipeFeedback, setLastSwipeFeedback] = useState<{
+    type: 'skip' | 'add';
+    dishName: string;
+  } | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const [waiterTab, setWaiterTab] = useState<'calls' | 'pickup' | 'floor'>('calls');
-  const [adminTab, setAdminTab] = useState<'menu' | 'floor' | 'qr' | 'apk-build'>('menu');
-  const [showApkModal, setShowApkModal] = useState<boolean>(false);
+  const [adminTab, setAdminTab] = useState<'menu' | 'floor' | 'qr'>('menu');
   const [editingDishId, setEditingDishId] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState<string>('');
-  const [copiedSql, setCopiedSql] = useState(false);
   const [activeThemeConfig, setActiveThemeConfig] = useState<{
     themeId: ThemeId;
     customBrandName: string;
@@ -484,6 +503,27 @@ export default function App() {
     });
   };
 
+  const handleAddFloorTable = () => {
+    soundFX.play('tap');
+    setState((prev) => {
+      const nextNum = prev.tables.length + 1;
+      return {
+        ...prev,
+        activeTable: nextNum,
+        tables: [
+          ...prev.tables,
+          {
+            tableNumber: nextNum,
+            shape: nextNum % 2 === 0 ? 'square' : 'round',
+            seats: 4,
+            status: 'free',
+            updatedAt: 'Just added',
+          },
+        ],
+      };
+    });
+  };
+
   const handleSwitchLevel = (level: ServiceLevel) => {
     soundFX.play('tap');
     setState((prev) => ({ ...prev, serviceLevel: level }));
@@ -514,7 +554,7 @@ export default function App() {
             onClick={() => setView('split-suite')}
             className="px-3 py-1 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] text-[12px] font-semibold cursor-pointer"
           >
-            ← Back to 4-Surface APK Command Center
+            ← Back to Command Center
           </button>
         </div>
         <ThemeCataloguePage
@@ -557,198 +597,63 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F7F2ED] text-[#1A0C06] flex flex-col">
-      {/* Top Product Command Header (Strict 3-Zone Contract) */}
-      <header className="bg-[#140905] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-3 sticky top-0 z-50">
-        <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-4">
-          {/* Zone 1: Brand Title */}
-          <a
-            href="#top"
-            onClick={(e) => {
-              e.preventDefault();
-              setView('split-suite');
-            }}
-            className="text-[17px] font-bold tracking-tight text-[#FBEFE6] no-underline whitespace-nowrap shrink-0"
-          >
-            The Cafe Ecosystem
-          </a>
-
-          {/* Zone 2: Surface Switcher Links */}
-          <nav
-            aria-label="Product surfaces"
-            className="hidden lg:flex items-center gap-5 text-[13px] font-medium"
-          >
-            {(
-              [
-                { id: 'split-suite', label: 'All 4 Surfaces' },
-                { id: 'guest-web', label: '1. Guest Swipe Menu' },
-                { id: 'waiter-apk', label: '2. Waiter APK' },
-                { id: 'kitchen-apk', label: '3. Kitchen KDS APK' },
-                { id: 'admin-apk', label: '4. Owner Admin APK' },
-              ] as Array<{ id: ActiveWorkspaceView; label: string }>
-            ).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setView(tab.id)}
-                className={`cursor-pointer transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
-                  view === tab.id
-                    ? 'text-[#FFFFFF] border-[#E8500C] font-semibold'
-                    : 'text-[#FBEFE6]/75 border-transparent hover:text-[#FFFFFF]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </nav>
-
-          {/* Zone 3: Primary Actions (Install APKs + 4-Theme Catalogue) */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              data-testid="open-apk-installer-btn"
-              onClick={() => setShowApkModal(true)}
-              className="px-3 py-1.5 rounded-[10px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] text-[12px] font-mono-code font-bold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+      {/* Top Product Command Header (Hidden when compiled as a dedicated single-role Android APK) */}
+      {!DEDICATED_APK_ROLE && (
+        <header className="bg-[#140905] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-3 sticky top-0 z-50">
+          <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-4">
+            {/* Zone 1: Brand Title */}
+            <a
+              href="#top"
+              onClick={(e) => {
+                e.preventDefault();
+                setView('split-suite');
+              }}
+              className="text-[17px] font-bold tracking-tight text-[#FBEFE6] no-underline whitespace-nowrap shrink-0"
             >
-              ↓ Install Phone APKs
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('theme-catalogue')}
-              className="px-3.5 py-1.5 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              The Cafe Ecosystem
+            </a>
+
+            {/* Zone 2: Surface Switcher Links */}
+            <nav
+              aria-label="Product surfaces"
+              className="hidden lg:flex items-center gap-5 text-[13px] font-medium"
             >
-              4-Theme Catalogue
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Direct Phone APK Download & Installation Modal */}
-      {showApkModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Direct Android Phone APKs for Waiter, Kitchen, and Owner"
-          className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 overflow-y-auto"
-        >
-          <div className="bg-[#140905] text-[#FBEFE6] border-2 border-[#C4F042] rounded-[24px] max-w-[820px] w-full p-6 flex flex-col gap-5">
-            <div className="flex items-start justify-between gap-4 border-b border-[#FBEFE6]/15 pb-4">
-              <div>
-                <span className="font-mono-code text-[11px] font-bold uppercase text-[#C4F042] tracking-wider block">
-                  DIRECT ANDROID PHONE INSTALLERS · 3 STAFF APKs
-                </span>
-                <h2 className="text-[22px] font-bold mt-1">
-                  Install Waiter, Kitchen &amp; Owner APKs on Staff Phones
-                </h2>
-                <p className="text-[13px] text-[#FBEFE6]/75 mt-1">
-                  Every push to <span className="font-mono-code text-[#C4F042]">varchasvaateeksh77-ui/the-cafe-ecosystem</span> compiles native signed Android <span className="font-mono-code">.apk</span> packages via GitHub Actions, or you can launch each phone surface directly in full-screen Android mode right now.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowApkModal(false)}
-                className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer shrink-0"
-              >
-                ✕ Close
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {[
-                {
-                  title: '1. Waiter Phone APK',
-                  pkg: 'com.buildbros.waiter',
-                  apkFile: 'buildbros-waiter.apk',
-                  role: 'Urgent Table Calls, Cart Snapshot & Kitchen Pass Pickup Alerts',
-                  viewId: 'waiter-apk' as ActiveWorkspaceView,
-                  query: '?apk=waiter',
-                  badge: 'FCM Wake-Lock + Vibration',
-                },
-                {
-                  title: '2. Kitchen & Reception APK',
-                  pkg: 'com.buildbros.kitchen',
-                  apkFile: 'buildbros-kitchen.apk',
-                  role: 'Reception Gate Confirmation + 4-Stage KDS (New → Cooking → Ready → Served)',
-                  viewId: 'kitchen-apk' as ActiveWorkspaceView,
-                  query: '?apk=kitchen',
-                  badge: 'Keep-Screen-Awake KDS',
-                },
-                {
-                  title: '3. Owner / Admin Phone APK',
-                  pkg: 'com.buildbros.admin',
-                  apkFile: 'buildbros-admin.apk',
-                  role: 'Instant Price Edits, 86 Sold-Out Toggles, Service Level 1/2/3 & 12-Table Floor',
-                  viewId: 'admin-apk' as ActiveWorkspaceView,
-                  query: '?apk=admin',
-                  badge: '<300ms Menu Broadcast',
-                },
-              ].map((item) => (
-                <div
-                  key={item.pkg}
-                  className="p-4 rounded-[16px] bg-[#1A0C06] border border-[#FBEFE6]/15 flex flex-col justify-between gap-3"
+              {(
+                [
+                  { id: 'split-suite', label: 'All 4 Surfaces' },
+                  { id: 'guest-web', label: '1. Guest Swipe Menu' },
+                  { id: 'waiter-apk', label: '2. Waiter App' },
+                  { id: 'kitchen-apk', label: '3. Kitchen KDS App' },
+                  { id: 'admin-apk', label: '4. Owner Admin App' },
+                ] as Array<{ id: ActiveWorkspaceView; label: string }>
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setView(tab.id)}
+                  className={`cursor-pointer transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+                    view === tab.id
+                      ? 'text-[#FFFFFF] border-[#E8500C] font-semibold'
+                      : 'text-[#FBEFE6]/75 border-transparent hover:text-[#FFFFFF]'
+                  }`}
                 >
-                  <div className="space-y-2">
-                    <span className="px-2 py-0.5 rounded-[6px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[10px] font-bold inline-block">
-                      {item.badge}
-                    </span>
-                    <h3 className="text-[16px] font-bold text-[#FBEFE6]">{item.title}</h3>
-                    <div className="font-mono-code text-[11px] text-[#FF8741]">{item.pkg}</div>
-                    <p className="text-[12px] text-[#FBEFE6]/75 leading-relaxed">{item.role}</p>
-                  </div>
-
-                  <div className="flex flex-col gap-2 pt-2 border-t border-[#FBEFE6]/10">
-                    <a
-                      href={`${GITHUB_RELEASES_URL}/download/${item.apkFile}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="w-full py-2 px-3 rounded-[8px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] font-mono-code text-[11px] font-bold text-center no-underline"
-                    >
-                      ↓ Download {item.apkFile}
-                    </a>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setView(item.viewId);
-                        setShowApkModal(false);
-                      }}
-                      className="w-full py-2 px-3 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[11px] font-semibold cursor-pointer"
-                    >
-                      Launch Full-Screen Phone Mode →
-                    </button>
-                  </div>
-                </div>
+                  {tab.label}
+                </button>
               ))}
-            </div>
+            </nav>
 
-            <div className="p-4 rounded-[14px] bg-[#1A0C06] border border-[#FBEFE6]/10 flex flex-wrap items-center justify-between gap-3 text-[12px]">
-              <div className="space-y-0.5">
-                <div className="font-mono-code font-bold text-[#C4F042]">
-                  GitHub Repository &amp; Automated Cloud APK Builder
-                </div>
-                <div className="text-[#FBEFE6]/75">
-                  Source code, Capacitor 6 Android projects, and GitHub Actions APK artifacts live in your new repo.
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <a
-                  href={GITHUB_ACTIONS_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#3A2214] text-[#C4F042] font-mono-code text-[11px] font-semibold no-underline"
-                >
-                  View APK Build Actions →
-                </a>
-                <a
-                  href={GITHUB_REPO_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3 py-1.5 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-semibold no-underline"
-                >
-                  Open GitHub Repo →
-                </a>
-              </div>
+            {/* Zone 3: Primary Action */}
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setView('theme-catalogue')}
+                className="px-3.5 py-1.5 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                4-Theme Catalogue
+              </button>
             </div>
           </div>
-        </div>
+        </header>
       )}
 
       {/* Workspace Sub-Toolbar: Live Supabase + FCM Telemetry & Level Controls */}
@@ -767,28 +672,32 @@ export default function App() {
 
           {/* Mobile surface selector + Level switcher + Sound FX */}
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex lg:hidden items-center gap-1">
-              {(
-                [
-                  { id: 'split-suite', label: 'All 4' },
-                  { id: 'guest-web', label: 'Guest' },
-                  { id: 'waiter-apk', label: 'Waiter' },
-                  { id: 'kitchen-apk', label: 'Kitchen' },
-                  { id: 'admin-apk', label: 'Admin' },
-                ] as Array<{ id: ActiveWorkspaceView; label: string }>
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setView(t.id)}
-                  className={`px-2 py-1 rounded-[6px] text-[11px] font-semibold cursor-pointer ${
-                    view === t.id ? 'bg-[#E8500C] text-[#FBEFE6]' : 'bg-[#2A180D] text-[#FBEFE6]/80'
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
+            {!DEDICATED_APK_ROLE && (
+              <div className="flex lg:hidden items-center gap-1">
+                {(
+                  [
+                    { id: 'split-suite', label: 'All 4' },
+                    { id: 'guest-web', label: 'Guest' },
+                    { id: 'waiter-apk', label: 'Waiter' },
+                    { id: 'kitchen-apk', label: 'Kitchen' },
+                    { id: 'admin-apk', label: 'Admin' },
+                  ] as Array<{ id: ActiveWorkspaceView; label: string }>
+                ).map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setView(t.id)}
+                    className={`px-2 py-1 rounded-[6px] text-[11px] font-semibold cursor-pointer ${
+                      view === t.id
+                        ? 'bg-[#E8500C] text-[#FBEFE6]'
+                        : 'bg-[#2A180D] text-[#FBEFE6]/80'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div
               className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
@@ -826,7 +735,7 @@ export default function App() {
 
       {/* Main Product Workspace */}
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 md:px-6 py-6 flex flex-col gap-6">
-        {/* Surface 4: Owner / Admin Dedicated Android APK (com.buildbros.admin) */}
+        {/* Surface 4: Owner / Admin Dedicated App (com.buildbros.admin) */}
         {(view === 'split-suite' || view === 'admin-apk') && (
           <section
             aria-label="Owner Admin Android APK"
@@ -836,10 +745,10 @@ export default function App() {
             <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2.5">
                 <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-bold">
-                  SURFACE 4 · OWNER ADMIN APK
+                  OWNER ADMIN APP
                 </span>
                 <h2 className="text-[15px] font-semibold m-0">
-                  com.buildbros.admin · Live Price, 86 Sold-Out &amp; Floor Controller
+                  {state.venueName} · Live Menu, Floor &amp; Table QR Generator
                 </h2>
               </div>
               <div className="flex items-center gap-4 font-mono-code text-[12px]">
@@ -857,14 +766,14 @@ export default function App() {
                 {(
                   [
                     { id: 'menu', label: 'Instant Menu & 86 Editor' },
-                    { id: 'floor', label: 'Live 12-Table Floor Monitor' },
-                    { id: 'qr', label: 'Table QR Plaque Generator' },
-                    { id: 'apk-build', label: 'Direct Phone APKs & Supabase SQL' },
+                    { id: 'floor', label: `Live ${state.tables.length}-Table Floor Monitor` },
+                    { id: 'qr', label: 'Table QR Generator & Print Export' },
                   ] as const
                 ).map((t) => (
                   <button
                     key={t.id}
                     type="button"
+                    data-testid={`admin-tab-${t.id}`}
                     onClick={() => setAdminTab(t.id)}
                     className={`px-3 py-1.5 rounded-[8px] text-[12px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
                       adminTab === t.id
@@ -1004,102 +913,31 @@ export default function App() {
               )}
 
               {adminTab === 'qr' && (
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 rounded-[16px] bg-[#F7F2ED] border border-[#E3D9D3]">
-                  <div className="flex flex-col gap-2">
-                    <span className="font-mono-code text-[11px] font-bold uppercase text-[#C03E0A]">
-                      Print-Ready Table QR Plaque · Table {state.activeTable}
-                    </span>
-                    <div className="font-semibold text-[16px]">
-                      https://menu.buildbros.app/{state.venueSlug}?table={state.activeTable}
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 mt-1">
-                      {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
-                        <button
-                          key={n}
-                          type="button"
-                          onClick={() => setState((prev) => ({ ...prev, activeTable: n }))}
-                          className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-semibold cursor-pointer ${
-                            state.activeTable === n
-                              ? 'bg-[#E8500C] text-[#FBEFE6]'
-                              : 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06]'
-                          }`}
-                        >
-                          Table {n}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {adminTab === 'apk-build' && (
-                <div className="p-4 rounded-[16px] bg-[#140905] text-[#FBEFE6] font-mono-code text-[12px] flex flex-col gap-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[#C4F042] font-bold">
-                      Direct Installable Android APKs (Waiter · Kitchen · Owner) + Supabase SQL
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowApkModal(true)}
-                        className="px-3 py-1 rounded-[6px] bg-[#C4F042] text-[#140905] text-[11px] font-bold cursor-pointer"
-                      >
-                        ↓ Open Phone APK Installer
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(
-                            `-- Run in Supabase SQL Editor (${SUPABASE_PROJECT_URL})\n-- Full migration in /supabase/migrations/0001_init_cafe_ecosystem.sql`
-                          );
-                          setCopiedSql(true);
-                          setTimeout(() => setCopiedSql(false), 2000);
-                        }}
-                        className="px-3 py-1 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] text-[11px] font-semibold cursor-pointer"
-                      >
-                        {copiedSql ? 'Copied SQL Info' : 'Copy SQL Reference'}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-                    <a
-                      href={`${GITHUB_RELEASES_URL}/download/buildbros-waiter.apk`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-2.5 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] no-underline flex items-center justify-between"
-                    >
-                      <span>1. buildbros-waiter.apk</span>
-                      <span className="text-[#C4F042] font-bold">↓ APK</span>
-                    </a>
-                    <a
-                      href={`${GITHUB_RELEASES_URL}/download/buildbros-kitchen.apk`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-2.5 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] no-underline flex items-center justify-between"
-                    >
-                      <span>2. buildbros-kitchen.apk</span>
-                      <span className="text-[#C4F042] font-bold">↓ APK</span>
-                    </a>
-                    <a
-                      href={`${GITHUB_RELEASES_URL}/download/buildbros-admin.apk`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-2.5 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] no-underline flex items-center justify-between"
-                    >
-                      <span>3. buildbros-admin.apk</span>
-                      <span className="text-[#C4F042] font-bold">↓ APK</span>
-                    </a>
-                  </div>
-                  <div className="text-[11px] text-[#FBEFE6]/70 break-all">
-                    Repo: {GITHUB_REPO_URL} · Supabase Key: {SUPABASE_PUBLISHABLE_KEY} · FCM VAPID: {FCM_VAPID_PUBLIC_KEY.slice(0, 32)}...
-                  </div>
-                </div>
+                <TableQrGenerator
+                  venueName={state.venueName}
+                  venueSlug={state.venueSlug}
+                  serviceLevel={state.serviceLevel}
+                  activeTable={state.activeTable}
+                  tables={state.tables}
+                  onSelectTable={(tableNumber) =>
+                    setState((prev) => ({ ...prev, activeTable: tableNumber }))
+                  }
+                  onAddTable={handleAddFloorTable}
+                  onTestTableMenu={(tableNumber) => {
+                    soundFX.play('tap');
+                    setState((prev) => ({ ...prev, activeTable: tableNumber }));
+                    setGuestStep('deck');
+                    if (view === 'admin-apk') {
+                      setView('guest-web');
+                    }
+                  }}
+                />
               )}
             </div>
           </section>
         )}
 
-        {/* 3 Operational Surfaces Grid: Guest Swipe Deck Menu + Waiter APK + Kitchen & Reception KDS APK */}
+        {/* 3 Operational Surfaces Grid: Guest Swipe Deck Menu + Waiter App + Kitchen & Reception KDS App */}
         <div
           className={`grid gap-6 items-start ${
             view === 'split-suite'
@@ -1122,7 +960,7 @@ export default function App() {
               <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3 border-b border-[#2A180D] flex items-center justify-between gap-2">
                 <div>
                   <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
-                    SURFACE 1 · GUEST SWIPE DECK MENU · DEMO
+                    GUEST SWIPE DECK MENU · DEMO
                   </span>
                   <h3 className="text-[15px] font-bold text-[#FBEFE6] m-0">
                     {state.venueName} · Table {state.activeTable}
@@ -1530,9 +1368,7 @@ export default function App() {
                                 </p>
 
                                 <div className="flex items-center justify-between pt-2 border-t border-[#E3D9D3] text-[11px] font-mono-code">
-                                  <span className="text-[#6C625C]">
-                                    Drag card left or right
-                                  </span>
+                                  <span className="text-[#6C625C]">Drag card left or right</span>
                                   {state.cart.find((c) => c.dish.id === currentDeckDish.id) ? (
                                     <span className="px-2 py-0.5 rounded bg-[#FFEEE3] text-[#C03E0A] font-bold">
                                       In Cart:{' '}
@@ -1716,7 +1552,7 @@ export default function App() {
             </section>
           )}
 
-          {/* Surface 2: Waiter Dedicated Android APK (com.buildbros.waiter) */}
+          {/* Surface 2: Waiter Dedicated App (com.buildbros.waiter) */}
           {(view === 'split-suite' || view === 'waiter-apk') && (
             <section
               aria-label="Waiter Dedicated Android APK"
@@ -1726,10 +1562,10 @@ export default function App() {
               <div className="bg-[#2A180D] px-4 py-3 border-b border-[#F7F2ED]/10 flex items-center justify-between">
                 <div>
                   <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
-                    SURFACE 2 · WAITER PHONE APK
+                    WAITER STAFF APP
                   </span>
                   <h3 className="text-[15px] font-bold text-[#FBEFE6] m-0">
-                    com.buildbros.waiter
+                    Floor Calls &amp; Kitchen Pass Pickup
                   </h3>
                 </div>
                 <span className="px-2 py-0.5 rounded-[6px] bg-[#140905] text-[#C4F042] font-mono-code text-[10px] font-semibold">
@@ -1894,7 +1730,7 @@ export default function App() {
             </section>
           )}
 
-          {/* Surface 3: Kitchen & Reception Dedicated Android APK (com.buildbros.kitchen) */}
+          {/* Surface 3: Kitchen & Reception Dedicated App (com.buildbros.kitchen) */}
           {(view === 'split-suite' || view === 'kitchen-apk') && (
             <section
               aria-label="Kitchen and Reception KDS Android APK"
@@ -1904,10 +1740,10 @@ export default function App() {
               <div className="bg-[#F7F2ED] px-4 py-3 border-b border-[#E3D9D3] flex items-center justify-between">
                 <div>
                   <span className="font-mono-code text-[10px] font-bold uppercase text-[#C03E0A] block">
-                    SURFACE 3 · KITCHEN &amp; RECEPTION APK
+                    KITCHEN &amp; RECEPTION KDS
                   </span>
                   <h3 className="text-[15px] font-bold text-[#1A0C06] m-0">
-                    com.buildbros.kitchen · 4-Stage KDS
+                    4-Stage Ticket Board
                   </h3>
                 </div>
                 <span className="px-2 py-0.5 rounded-[6px] bg-[#FFEEE3] text-[#C03E0A] font-mono-code text-[10px] font-semibold">
@@ -1985,7 +1821,7 @@ export default function App() {
                             {ord.status === 'new'
                               ? 'Start Cooking'
                               : ord.status === 'cooking'
-                              ? 'Mark Ready (Alert Waiter APK)'
+                              ? 'Mark Ready (Alert Waiter App)'
                               : 'Mark Served'}
                           </button>
                         )

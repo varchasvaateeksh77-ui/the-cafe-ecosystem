@@ -11,9 +11,12 @@ permissions:
 jobs:
   build-apks:
     runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
@@ -28,11 +31,12 @@ jobs:
 
       - name: Install Root Dependencies & Capacitor Android
         run: |
-          npm install
-          npm install --no-save @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
+          npm install --legacy-peer-deps
+          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
 
       - name: Build 1 - Waiter Phone APK (com.buildbros.waiter)
         run: |
+          mkdir -p apks
           VITE_DEFAULT_APK=waiter npm run build
           cat > capacitor.config.json << 'EOF'
           {
@@ -45,6 +49,7 @@ jobs:
           rm -rf android
           npx cap add android
           cd android && chmod +x gradlew && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-waiter.apk
           cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-waiter.apk
 
       - name: Build 2 - Kitchen & Reception KDS APK (com.buildbros.kitchen)
@@ -61,6 +66,7 @@ jobs:
           rm -rf android
           npx cap add android
           cd android && chmod +x gradlew && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-kitchen.apk
           cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-kitchen.apk
 
       - name: Build 3 - Owner Admin Phone APK (com.buildbros.admin)
@@ -77,16 +83,26 @@ jobs:
           rm -rf android
           npx cap add android
           cd android && chmod +x gradlew && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-admin.apk
           cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-admin.apk
+          rm -rf android capacitor.config.json
+
+      - name: Commit Compiled .apk Files Directly into /apks in Repo
+        run: |
+          git config user.name "varchasvaateeksh77-ui"
+          git config user.email "varchasvaateeksh77@gmail.com"
+          git add -f apks/buildbros-waiter.apk apks/buildbros-kitchen.apk apks/buildbros-admin.apk
+          git commit -m "chore(apk): add compiled Android .apk files to /apks [skip ci]" || true
+          git push origin HEAD:main || true
 
       - name: Upload 3 Android APKs as Workflow Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: buildbros-cafe-ecosystem-apks
           path: |
-            buildbros-waiter.apk
-            buildbros-kitchen.apk
-            buildbros-admin.apk
+            apks/buildbros-waiter.apk
+            apks/buildbros-kitchen.apk
+            apks/buildbros-admin.apk
 
       - name: Publish Direct Download APKs to GitHub Release (latest)
         env:
@@ -94,9 +110,9 @@ jobs:
         run: |
           gh release delete v1.0.0 --yes --cleanup-tag || true
           gh release create v1.0.0 \
-            buildbros-waiter.apk \
-            buildbros-kitchen.apk \
-            buildbros-admin.apk \
+            apks/buildbros-waiter.apk \
+            apks/buildbros-kitchen.apk \
+            apks/buildbros-admin.apk \
             --title "The Cafe Ecosystem — Direct Android Phone APKs (v1.0.0)" \
             --notes "Direct installable Android APKs for staff phones:
             - **Waiter Phone APK** (\`buildbros-waiter.apk\` · \`com.buildbros.waiter\`)
