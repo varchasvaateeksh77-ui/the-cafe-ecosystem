@@ -1,13 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CafeEcosystemState,
+  CrossDeviceAlert,
   DishItem,
+  KitchenOrder,
   PushNotificationEvent,
-  SUPABASE_PROJECT_URL,
   ServiceLevel,
   applyAdminDishPatch,
   calculateCartTotal,
   createInitialCafeState,
+  fetchCloudEcosystemState,
+  saveCloudEcosystemState,
   supabase,
 } from './lib/ecosystemStore';
 import { TableQrGenerator } from './components/TableQrGenerator';
@@ -15,6 +18,10 @@ import { ThemeCataloguePage } from './catalogue/ThemeCataloguePage';
 import { LiveThemeInstance } from './catalogue/LiveThemeInstance';
 import { ThemeId } from './catalogue/themeCatalogData';
 import { soundFX, useSoundEffects } from './lib/soundEffects';
+import {
+  initNativeNotifications,
+  triggerUrgentDeviceNotification,
+} from './lib/nativeNotifications';
 
 type ActiveWorkspaceView =
   | 'split-suite'
@@ -82,10 +89,11 @@ export default function App() {
   } | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
-  const [waiterTab, setWaiterTab] = useState<'calls' | 'pickup' | 'floor'>('calls');
+  const [waiterTab, setWaiterTab] = useState<'pickup' | 'calls' | 'floor'>('pickup');
   const [adminTab, setAdminTab] = useState<'menu' | 'floor' | 'qr'>('menu');
   const [editingDishId, setEditingDishId] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState<string>('');
+  const [liveToast, setLiveToast] = useState<{ title: string; body: string } | null>(null);
   const [activeThemeConfig, setActiveThemeConfig] = useState<{
     themeId: ThemeId;
     customBrandName: string;
@@ -100,13 +108,91 @@ export default function App() {
 
   const { soundEnabled, toggleSound } = useSoundEffects();
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const stateVersionRef = useRef<number>(state.stateVersion || 1);
+  const lastProcessedAlertIdRef = useRef<string | null>(state.lastAlert?.id || null);
 
   useEffect(() => {
+    stateVersionRef.current = state.stateVersion || 1;
+  }, [state.stateVersion]);
+
+  // Initialize Native Android Notification Channel & Permissions on Mount
+  useEffect(() => {
+    initNativeNotifications();
+  }, []);
+
+  // Process Incoming Cross-Device State & Trigger Native Notification / Auto-Tab Switch
+  const applyIncomingRemoteState = useCallback(
+    (incoming: CafeEcosystemState) => {
+      if (!incoming || !Array.isArray(incoming.orders)) return;
+      if ((incoming.stateVersion || 0) <= stateVersionRef.current) return;
+
+      stateVersionRef.current = incoming.stateVersion;
+
+      // Preserve URL-bound activeTable on guest phones while syncing shared orders/calls/menu
+      setState((prev) => ({
+        ...incoming,
+        activeTable: prev.activeTable,
+        cart: prev.cart,
+        realtimeConnected: true,
+      }));
+
+      // Check if there is a new alert that hasn't been notified yet
+      const alert = incoming.lastAlert;
+      if (alert && alert.id !== lastProcessedAlertIdRef.current) {
+        lastProcessedAlertIdRef.current = alert.id;
+
+        const isForWaiter =
+          alert.targetApk === 'com.buildbros.waiter' &&
+          (view === 'waiter-apk' || view === 'split-suite' || DEDICATED_APK_ROLE === 'waiter');
+        const isForKitchen =
+          alert.targetApk === 'com.buildbros.kitchen' &&
+          (view === 'kitchen-apk' || view === 'split-suite' || DEDICATED_APK_ROLE === 'kitchen');
+        const isForGuest =
+          alert.targetApk === 'guest-web' &&
+          (view === 'guest-web' || view === 'split-suite');
+
+        if (isForWaiter || isForKitchen || isForGuest) {
+          if (alert.title.includes('READY')) {
+            soundFX.play('kitchenReady');
+            setWaiterTab('pickup');
+          } else if (alert.title.includes('Waiter')) {
+            soundFX.play('waiterCall');
+            setWaiterTab('calls');
+          } else {
+            soundFX.play('ticketSent');
+          }
+
+          setLiveToast({ title: alert.title, body: alert.body });
+          window.setTimeout(() => setLiveToast(null), 5000);
+          triggerUrgentDeviceNotification(alert.title, alert.body);
+        }
+      }
+    },
+    [view]
+  );
+
+  // Subscribe to Supabase Realtime Broadcast + Persistent Cloud State Sync
+  useEffect(() => {
+    let active = true;
+
+    // 1. Initial pull from Supabase Cloud Storage
+    fetchCloudEcosystemState().then((remote) => {
+      if (active && remote) {
+        applyIncomingRemoteState(remote);
+      }
+    });
+
+    // 2. Realtime WebSocket Broadcast Channel (<150ms)
     const channel = supabase.channel('cafe-ecosystem-realtime', {
       config: { broadcast: { self: false } },
     });
 
     channel
+      .on('broadcast', { event: 'state_sync' }, (payload) => {
+        if (payload?.payload) {
+          applyIncomingRemoteState(payload.payload as CafeEcosystemState);
+        }
+      })
       .on('broadcast', { event: 'dish_patch' }, (payload) => {
         if (payload?.payload) {
           const { dishId, patch } = payload.payload as {
@@ -123,38 +209,112 @@ export default function App() {
       });
 
     channelRef.current = channel;
+
+    // 3. Foreground / App-Switch Resume Listener + Fast Cloud Polling Fallback (every 1.5s)
+    // Ensures switching between Kitchen APK and Waiter APK on the same phone always syncs!
+    const syncFromCloud = () => {
+      fetchCloudEcosystemState().then((remote) => {
+        if (active && remote) {
+          applyIncomingRemoteState(remote);
+        }
+      });
+    };
+
+    const pollInterval = window.setInterval(syncFromCloud, 1500);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncFromCloud();
+      }
+    };
+    window.addEventListener('focus', syncFromCloud);
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      active = false;
+      window.clearInterval(pollInterval);
+      window.removeEventListener('focus', syncFromCloud);
+      document.removeEventListener('visibilitychange', handleVisibility);
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [applyIncomingRemoteState]);
 
-  const pushLog = (
-    targetApk: PushNotificationEvent['targetApk'],
-    channel: string,
-    title: string,
-    body: string
+  // Unified Mutator: Updates Local State + Broadcasts via WebSocket + Saves to Supabase Cloud
+  const commitAndSync = (
+    recipe: (prev: CafeEcosystemState) => CafeEcosystemState,
+    alertInfo?: {
+      targetApk: PushNotificationEvent['targetApk'];
+      channel: string;
+      title: string;
+      body: string;
+      notifyCurrentDeviceToo?: boolean;
+    }
   ) => {
-    const now = new Date().toLocaleTimeString([], {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
+    setState((prev) => {
+      const baseNext = recipe(prev);
+      const nextVersion = Math.max(prev.stateVersion || 1, stateVersionRef.current) + 1;
+      stateVersionRef.current = nextVersion;
+
+      const now = new Date().toLocaleTimeString([], {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      const latencyMs = Math.floor(105 + Math.random() * 65);
+
+      let nextPushEvents = baseNext.pushEvents;
+      let nextAlert: CrossDeviceAlert | undefined = baseNext.lastAlert;
+
+      if (alertInfo) {
+        const alertId = `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        lastProcessedAlertIdRef.current = alertId;
+
+        const evt: PushNotificationEvent = {
+          id: alertId,
+          timestamp: now,
+          targetApk: alertInfo.targetApk,
+          channel: alertInfo.channel,
+          title: alertInfo.title,
+          body: alertInfo.body,
+          latencyMs,
+        };
+        nextPushEvents = [evt, ...baseNext.pushEvents.slice(0, 19)];
+        nextAlert = {
+          id: alertId,
+          targetApk: alertInfo.targetApk,
+          title: alertInfo.title,
+          body: alertInfo.body,
+          createdAtMs: Date.now(),
+        };
+
+        if (alertInfo.notifyCurrentDeviceToo) {
+          setLiveToast({ title: alertInfo.title, body: alertInfo.body });
+          window.setTimeout(() => setLiveToast(null), 4500);
+          triggerUrgentDeviceNotification(alertInfo.title, alertInfo.body);
+        }
+      }
+
+      const finalState: CafeEcosystemState = {
+        ...baseNext,
+        stateVersion: nextVersion,
+        updatedAtMs: Date.now(),
+        lastSyncLatencyMs: latencyMs,
+        pushEvents: nextPushEvents,
+        lastAlert: nextAlert,
+      };
+
+      // Broadcast over Supabase Realtime WebSocket immediately
+      channelRef.current?.send({
+        type: 'broadcast',
+        event: 'state_sync',
+        payload: finalState,
+      });
+
+      // Persist to Supabase Cloud Storage so switching APKs on the phone stays 100% synced
+      saveCloudEcosystemState(finalState);
+
+      return finalState;
     });
-    const latencyMs = Math.floor(110 + Math.random() * 75);
-    const evt: PushNotificationEvent = {
-      id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      timestamp: now,
-      targetApk,
-      channel,
-      title,
-      body,
-      latencyMs,
-    };
-    setState((prev) => ({
-      ...prev,
-      lastSyncLatencyMs: latencyMs,
-      pushEvents: [evt, ...prev.pushEvents.slice(0, 19)],
-    }));
   };
 
   // Available dishes in selected sub-section
@@ -274,47 +434,56 @@ export default function App() {
     }
   };
 
+  // Level 2: Call the Waiter (Syncs to Waiter APK & fires urgent notification)
   const handleGuestCallWaiter = () => {
     soundFX.play('waiterCall');
     const total = calculateCartTotal(state.cart);
+    const itemsSummary = state.cart.map((c) => `${c.qty}x ${c.dish.name}`).join(', ');
     const now = new Date().toLocaleTimeString([], {
       hour12: false,
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
     });
-    setState((prev) => ({
-      ...prev,
-      waiterCalls: [
-        {
-          id: `wc-${Date.now()}`,
-          tableNumber: prev.activeTable,
-          cartSnapshot: [...prev.cart],
-          cartTotal: total,
-          status: 'pending',
-          createdAt: now,
-        },
-        ...prev.waiterCalls.filter((c) => c.tableNumber !== prev.activeTable),
-      ],
-      tables: prev.tables.map((t) =>
-        t.tableNumber === prev.activeTable
-          ? { ...t, status: 'waiter_called', cartTotal: total, updatedAt: 'Just now' }
-          : t
-      ),
-    }));
-    pushLog(
-      'com.buildbros.waiter',
-      'fcm:waiter_calls_urgent',
-      `Table ${state.activeTable} Needs a Waiter`,
-      `Cart ready (${state.currencySymbol}${total}) — High-priority FCM chime fired`
+
+    setWaiterTab('calls');
+    commitAndSync(
+      (prev) => ({
+        ...prev,
+        waiterCalls: [
+          {
+            id: `wc-${Date.now()}`,
+            tableNumber: prev.activeTable,
+            cartSnapshot: [...prev.cart],
+            cartTotal: total,
+            status: 'pending',
+            createdAt: now,
+          },
+          ...prev.waiterCalls.filter((c) => c.tableNumber !== prev.activeTable),
+        ],
+        tables: prev.tables.map((t) =>
+          t.tableNumber === prev.activeTable
+            ? { ...t, status: 'waiter_called', cartTotal: total, updatedAt: 'Just now' }
+            : t
+        ),
+      }),
+      {
+        targetApk: 'com.buildbros.waiter',
+        channel: 'fcm:waiter_calls_urgent',
+        title: `URGENT · Table ${state.activeTable} Called Waiter`,
+        body: `Cart (${state.currencySymbol}${total}): ${itemsSummary}`,
+        notifyCurrentDeviceToo: true,
+      }
     );
   };
 
+  // Level 3: Send the Order (Syncs to Kitchen APK & fires pass bell notification)
   const handleGuestPlaceOrder = () => {
     if (state.cart.length === 0) return;
     soundFX.play('ticketSent');
     const ticketNumber = `#0${Math.floor(413 + Math.random() * 85)}`;
     const totalAmount = calculateCartTotal(state.cart);
+    const itemsSummary = state.cart.map((c) => `${c.qty}x ${c.dish.name}`).join(', ');
     const now = new Date().toLocaleTimeString([], {
       hour12: false,
       hour: '2-digit',
@@ -322,158 +491,215 @@ export default function App() {
       second: '2-digit',
     });
 
-    setState((prev) => ({
-      ...prev,
-      orders: [
-        {
-          id: `ord-${Date.now()}`,
-          ticketNumber,
-          tableNumber: prev.activeTable,
-          items: [...prev.cart],
-          totalAmount,
-          receptionConfirmed: prev.autoRouteToKitchen,
-          status: prev.autoRouteToKitchen ? 'cooking' : 'incoming',
-          notes: '',
-          createdAt: now,
-        },
-        ...prev.orders,
-      ],
-      tables: prev.tables.map((t) =>
-        t.tableNumber === prev.activeTable
-          ? {
-              ...t,
-              status: prev.autoRouteToKitchen ? 'cooking' : 'ordering',
-              activeTicket: ticketNumber,
-              cartTotal: totalAmount,
-              updatedAt: 'Just now',
-            }
-          : t
-      ),
-    }));
-
-    pushLog(
-      'com.buildbros.kitchen',
-      'fcm:kitchen_pass_bell',
-      `New Order ${ticketNumber} · Table ${state.activeTable}`,
-      `${state.cart.map((c) => `${c.qty}x ${c.dish.name}`).join(', ')} (${
-        state.autoRouteToKitchen ? 'Auto-routed to KDS' : 'At Reception Gate'
-      })`
+    commitAndSync(
+      (prev) => ({
+        ...prev,
+        orders: [
+          {
+            id: `ord-${Date.now()}`,
+            ticketNumber,
+            tableNumber: prev.activeTable,
+            items: [...prev.cart],
+            totalAmount,
+            receptionConfirmed: prev.autoRouteToKitchen,
+            status: prev.autoRouteToKitchen ? 'cooking' : 'incoming',
+            notes: '',
+            createdAt: now,
+          },
+          ...prev.orders,
+        ],
+        tables: prev.tables.map((t) =>
+          t.tableNumber === prev.activeTable
+            ? {
+                ...t,
+                status: prev.autoRouteToKitchen ? 'cooking' : 'ordering',
+                activeTicket: ticketNumber,
+                cartTotal: totalAmount,
+                updatedAt: 'Just now',
+              }
+            : t
+        ),
+      }),
+      {
+        targetApk: 'com.buildbros.kitchen',
+        channel: 'fcm:kitchen_pass_bell',
+        title: `NEW ORDER ${ticketNumber} · Table ${state.activeTable}`,
+        body: `${itemsSummary} (${state.currencySymbol}${totalAmount})`,
+        notifyCurrentDeviceToo: true,
+      }
     );
   };
 
-  // Waiter APK Handlers
+  // Waiter APK: Acknowledge Table Call ("On My Way")
   const handleWaiterAcknowledge = (callId: string) => {
     soundFX.play('served');
-    setState((prev) => {
-      const target = prev.waiterCalls.find((c) => c.id === callId);
-      return {
+    const targetCall = state.waiterCalls.find((c) => c.id === callId);
+    const tableNum = targetCall?.tableNumber || state.activeTable;
+
+    commitAndSync(
+      (prev) => ({
         ...prev,
         waiterCalls: prev.waiterCalls.map((c) =>
           c.id === callId ? { ...c, status: 'acknowledged', acknowledgedBy: 'Staff #04' } : c
         ),
         tables: prev.tables.map((t) =>
-          target && t.tableNumber === target.tableNumber
+          t.tableNumber === tableNum
             ? { ...t, status: 'ordering', updatedAt: 'Just now' }
             : t
         ),
-      };
-    });
-    pushLog(
-      'guest-web',
-      'supabase_realtime:waiter_calls',
-      `Waiter On My Way → Table ${state.activeTable}`,
-      'Waiter APK claimed call; guest phone banner updated in real time'
+      }),
+      {
+        targetApk: 'guest-web',
+        channel: 'supabase_realtime:waiter_calls',
+        title: `Waiter On My Way → Table ${tableNum}`,
+        body: `Waiter claimed Table ${tableNum} call and is walking over now.`,
+        notifyCurrentDeviceToo: false,
+      }
     );
   };
 
+  // Waiter APK: Mark Ready Order as Served at Table
   const handleWaiterServeOrder = (orderId: string) => {
     soundFX.play('served');
-    setState((prev) => {
-      const target = prev.orders.find((o) => o.id === orderId);
-      return {
+    const targetOrder = state.orders.find((o) => o.id === orderId);
+    const tableNum = targetOrder?.tableNumber || state.activeTable;
+    const ticketNum = targetOrder?.ticketNumber || '#Order';
+
+    commitAndSync(
+      (prev) => ({
         ...prev,
         orders: prev.orders.map((o) => (o.id === orderId ? { ...o, status: 'served' } : o)),
         tables: prev.tables.map((t) =>
-          target && t.tableNumber === target.tableNumber
-            ? { ...t, status: 'served', updatedAt: 'Just now' }
-            : t
+          t.tableNumber === tableNum ? { ...t, status: 'served', updatedAt: 'Just now' } : t
         ),
-      };
-    });
-    pushLog(
-      'com.buildbros.admin',
-      'supabase_realtime:orders',
-      'Order Delivered & Table Served',
-      'Waiter APK marked pickup ticket as Served'
+      }),
+      {
+        targetApk: 'com.buildbros.admin',
+        channel: 'supabase_realtime:orders',
+        title: `Order ${ticketNum} Served at Table ${tableNum}`,
+        body: `Waiter delivered ${ticketNum} to Table ${tableNum}.`,
+        notifyCurrentDeviceToo: false,
+      }
     );
   };
 
-  // Kitchen & Reception KDS APK Handlers
-  const handleReceptionConfirm = (orderId: string) => {
-    soundFX.play('tap');
-    setState((prev) => ({
-      ...prev,
-      orders: prev.orders.map((o) =>
-        o.id === orderId ? { ...o, receptionConfirmed: true, status: 'new' } : o
-      ),
-    }));
-    pushLog(
-      'com.buildbros.kitchen',
-      'supabase_realtime:orders',
-      'Reception Confirmed Ticket',
-      'Ticket released from Counter Gate to Kitchen Pass KDS'
+  // Kitchen & Reception KDS APK: Confirm Incoming Order or Set Any Stage Directly
+  const handleKitchenSetOrderStatus = (
+    orderId: string,
+    nextStatus: KitchenOrder['status']
+  ) => {
+    const target = state.orders.find((o) => o.id === orderId);
+    if (!target) return;
+
+    const isReady = nextStatus === 'ready';
+    soundFX.play(isReady ? 'kitchenReady' : nextStatus === 'served' ? 'served' : 'tap');
+
+    if (isReady) {
+      setWaiterTab('pickup');
+    }
+
+    const itemsSummary = target.items.map((i) => `${i.qty}x ${i.dish.name}`).join(', ');
+
+    commitAndSync(
+      (prev) => ({
+        ...prev,
+        orders: prev.orders.map((o) =>
+          o.id === orderId ? { ...o, receptionConfirmed: true, status: nextStatus } : o
+        ),
+        tables: prev.tables.map((t) =>
+          t.tableNumber === target.tableNumber
+            ? {
+                ...t,
+                status:
+                  nextStatus === 'cooking'
+                    ? 'cooking'
+                    : nextStatus === 'ready'
+                    ? 'ready'
+                    : nextStatus === 'served'
+                    ? 'served'
+                    : 'ordering',
+                updatedAt: 'Just now',
+              }
+            : t
+        ),
+      }),
+      isReady
+        ? {
+            targetApk: 'com.buildbros.waiter',
+            channel: 'fcm:waiter_calls_urgent',
+            title: `PICKUP READY · ${target.ticketNumber} (Table ${target.tableNumber})`,
+            body: `Ready at Kitchen Pass: ${itemsSummary}`,
+            notifyCurrentDeviceToo: true,
+          }
+        : {
+            targetApk: 'guest-web',
+            channel: 'supabase_realtime:orders',
+            title: `Ticket ${target.ticketNumber} → ${nextStatus.toUpperCase()}`,
+            body: `Table ${target.tableNumber}: ${itemsSummary}`,
+            notifyCurrentDeviceToo: false,
+          }
     );
   };
 
   const handleKitchenAdvance = (orderId: string) => {
     const target = state.orders.find((o) => o.id === orderId);
     if (!target) return;
-    const nextStatusMap: Record<typeof target.status, typeof target.status> = {
+    const nextStatusMap: Record<KitchenOrder['status'], KitchenOrder['status']> = {
       incoming: 'new',
       new: 'cooking',
       cooking: 'ready',
       ready: 'served',
       served: 'served',
     };
-    const nextStatus = nextStatusMap[target.status];
-    soundFX.play(nextStatus === 'served' ? 'served' : 'kitchenReady');
+    handleKitchenSetOrderStatus(orderId, nextStatusMap[target.status]);
+  };
 
-    setState((prev) => ({
-      ...prev,
-      orders: prev.orders.map((o) =>
-        o.id === orderId ? { ...o, receptionConfirmed: true, status: nextStatus } : o
-      ),
-      tables: prev.tables.map((t) =>
-        t.tableNumber === target.tableNumber
-          ? {
-              ...t,
-              status:
-                nextStatus === 'cooking'
-                  ? 'cooking'
-                  : nextStatus === 'ready'
-                  ? 'ready'
-                  : 'served',
-              updatedAt: 'Just now',
-            }
-          : t
-      ),
-    }));
+  // Spawn / Reset Demo Orders so Kitchen & Waiter always have active tickets to test
+  const handleSpawnFreshKitchenTicket = () => {
+    soundFX.play('ticketSent');
+    const ticketNumber = `#0${Math.floor(415 + Math.random() * 80)}`;
+    const now = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const sampleItems = [
+      { dish: state.dishes[0], qty: 2 },
+      { dish: state.dishes[2], qty: 1 },
+    ];
+    const totalAmount = calculateCartTotal(sampleItems);
 
-    if (nextStatus === 'ready') {
-      pushLog(
-        'com.buildbros.waiter',
-        'fcm:waiter_calls_urgent',
-        `PICKUP READY · ${target.ticketNumber} (Table ${target.tableNumber})`,
-        'Kitchen KDS marked Ready — FCM high-priority alert fired to Waiter APK'
-      );
-    } else {
-      pushLog(
-        'guest-web',
-        'supabase_realtime:orders',
-        `Ticket ${target.ticketNumber} → ${nextStatus.toUpperCase()}`,
-        `Guest phone at Table ${target.tableNumber} updated live`
-      );
-    }
+    commitAndSync(
+      (prev) => ({
+        ...prev,
+        orders: [
+          {
+            id: `ord-${Date.now()}`,
+            ticketNumber,
+            tableNumber: prev.activeTable,
+            items: sampleItems,
+            totalAmount,
+            receptionConfirmed: true,
+            status: 'cooking',
+            notes: 'Fresh test ticket',
+            createdAt: now,
+          },
+          ...prev.orders.map((o) =>
+            o.ticketNumber === '#0412'
+              ? { ...o, receptionConfirmed: true, status: 'cooking' as const }
+              : o
+          ),
+        ],
+      }),
+      {
+        targetApk: 'com.buildbros.kitchen',
+        channel: 'supabase_realtime:orders',
+        title: `Active Ticket ${ticketNumber} Ready to Test`,
+        body: `Tap "Mark Dish Ready" to test live Waiter pickup notification.`,
+        notifyCurrentDeviceToo: false,
+      }
+    );
   };
 
   // Admin APK Handlers
@@ -481,11 +707,12 @@ export default function App() {
     const parsed = parseFloat(priceDraft);
     if (!Number.isNaN(parsed) && parsed > 0) {
       soundFX.play('tap');
-      setState((prev) => applyAdminDishPatch(prev, dishId, { price: Math.round(parsed) }));
+      const rounded = Math.round(parsed);
+      commitAndSync((prev) => applyAdminDishPatch(prev, dishId, { price: rounded }));
       channelRef.current?.send({
         type: 'broadcast',
         event: 'dish_patch',
-        payload: { dishId, patch: { price: Math.round(parsed) } },
+        payload: { dishId, patch: { price: rounded } },
       });
     }
     setEditingDishId(null);
@@ -495,7 +722,9 @@ export default function App() {
     soundFX.play('tap');
     const target = state.dishes.find((d) => d.id === dishId);
     const nextAvailable = !target?.isAvailable;
-    setState((prev) => applyAdminDishPatch(prev, dishId, { isAvailable: nextAvailable }));
+    commitAndSync((prev) =>
+      applyAdminDishPatch(prev, dishId, { isAvailable: nextAvailable })
+    );
     channelRef.current?.send({
       type: 'broadcast',
       event: 'dish_patch',
@@ -505,7 +734,7 @@ export default function App() {
 
   const handleAddFloorTable = () => {
     soundFX.play('tap');
-    setState((prev) => {
+    commitAndSync((prev) => {
       const nextNum = prev.tables.length + 1;
       return {
         ...prev,
@@ -526,19 +755,23 @@ export default function App() {
 
   const handleSwitchLevel = (level: ServiceLevel) => {
     soundFX.play('tap');
-    setState((prev) => ({ ...prev, serviceLevel: level }));
     if (level === 1) {
       setGuestStep('deck');
     }
-    pushLog(
-      'guest-web',
-      'supabase_realtime:venues',
-      `Service Level Switched → Level ${level}`,
-      level === 1
-        ? 'All tables switched to Digital Menu browse mode'
-        : level === 2
-        ? 'All tables enabled Swipe Deck Cart + Call the Waiter'
-        : 'All tables enabled Swipe Deck Cart + Send the Order to Kitchen KDS'
+    commitAndSync(
+      (prev) => ({ ...prev, serviceLevel: level }),
+      {
+        targetApk: 'guest-web',
+        channel: 'supabase_realtime:venues',
+        title: `Service Level Switched → Level ${level}`,
+        body:
+          level === 1
+            ? 'All tables switched to Digital Menu browse mode'
+            : level === 2
+            ? 'All tables enabled Swipe Deck Cart + Call the Waiter'
+            : 'All tables enabled Swipe Deck Cart + Send the Order',
+        notifyCurrentDeviceToo: false,
+      }
     );
   };
 
@@ -597,9 +830,36 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F7F2ED] text-[#1A0C06] flex flex-col">
+      {/* High-Priority Heads-Up Notification Toast Banner (Appears on Cross-Device Events) */}
+      {liveToast && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          data-testid="live-push-toast"
+          className="fixed top-3 left-3 right-3 z-50 max-w-[520px] mx-auto p-3.5 rounded-[14px] bg-[#140905] text-[#FBEFE6] border-2 border-[#C4F042] flex items-center justify-between gap-3"
+        >
+          <div className="min-w-0">
+            <div className="font-mono-code text-[11px] font-bold text-[#C4F042] uppercase">
+              ● LIVE PUSH NOTIFICATION
+            </div>
+            <div className="font-bold text-[14px] text-[#FFFFFF] truncate">
+              {liveToast.title}
+            </div>
+            <div className="text-[12px] text-[#FBEFE6]/85 truncate">{liveToast.body}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLiveToast(null)}
+            className="px-2.5 py-1 rounded-[8px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[11px] font-bold cursor-pointer shrink-0"
+          >
+            OK
+          </button>
+        </div>
+      )}
+
       {/* Top Product Command Header (Hidden when compiled as a dedicated single-role Android APK) */}
       {!DEDICATED_APK_ROLE && (
-        <header className="bg-[#140905] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-3 sticky top-0 z-50">
+        <header className="bg-[#140905] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-3 sticky top-0 z-40">
           <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-4">
             {/* Zone 1: Brand Title */}
             <a
@@ -642,81 +902,63 @@ export default function App() {
               ))}
             </nav>
 
-            {/* Zone 3: Primary Action */}
+            {/* Zone 3: Level Switcher + 4-Theme Catalogue */}
             <div className="flex items-center gap-2 shrink-0">
+              <div
+                className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
+                role="group"
+                aria-label="Venue Service Level"
+              >
+                {([1, 2, 3] as ServiceLevel[]).map((lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    data-testid={`switch-level-${lvl}-btn`}
+                    onClick={() => handleSwitchLevel(lvl)}
+                    className={`px-2 py-1 rounded-[6px] font-mono-code text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                      state.serviceLevel === lvl
+                        ? 'bg-[#E8500C] text-[#FBEFE6]'
+                        : 'text-[#FBEFE6]/75 hover:text-[#FFFFFF]'
+                    }`}
+                  >
+                    Level {lvl}
+                  </button>
+                ))}
+              </div>
+
               <button
                 type="button"
                 onClick={() => setView('theme-catalogue')}
-                className="px-3.5 py-1.5 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                className="hidden sm:inline-block px-3 py-1.5 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 4-Theme Catalogue
               </button>
             </div>
           </div>
-        </header>
-      )}
 
-      {/* Workspace Sub-Toolbar: Live Supabase + FCM Telemetry & Level Controls */}
-      <div className="bg-[#1A0C06] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-2.5">
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3 text-[12px]">
-          <div className="flex flex-wrap items-center gap-3 font-mono-code">
-            <span className="inline-flex items-center gap-1.5 text-[#C4F042] font-semibold">
-              <span className="w-2 h-2 rounded-full bg-[#C4F042]" aria-hidden="true" />
-              Supabase Realtime + FCM Active ({state.lastSyncLatencyMs}ms)
-            </span>
-            <span className="text-[#FBEFE6]/60 hidden sm:inline">·</span>
-            <span className="text-[#FBEFE6]/80 hidden sm:inline">
-              {SUPABASE_PROJECT_URL.replace('https://', '')}
-            </span>
-          </div>
-
-          {/* Mobile surface selector + Level switcher + Sound FX */}
-          <div className="flex flex-wrap items-center gap-2">
-            {!DEDICATED_APK_ROLE && (
-              <div className="flex lg:hidden items-center gap-1">
-                {(
-                  [
-                    { id: 'split-suite', label: 'All 4' },
-                    { id: 'guest-web', label: 'Guest' },
-                    { id: 'waiter-apk', label: 'Waiter' },
-                    { id: 'kitchen-apk', label: 'Kitchen' },
-                    { id: 'admin-apk', label: 'Admin' },
-                  ] as Array<{ id: ActiveWorkspaceView; label: string }>
-                ).map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setView(t.id)}
-                    className={`px-2 py-1 rounded-[6px] text-[11px] font-semibold cursor-pointer ${
-                      view === t.id
-                        ? 'bg-[#E8500C] text-[#FBEFE6]'
-                        : 'bg-[#2A180D] text-[#FBEFE6]/80'
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div
-              className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
-              role="group"
-              aria-label="Venue Service Level"
-            >
-              {([1, 2, 3] as ServiceLevel[]).map((lvl) => (
+          {/* Mobile surface switcher bar (only in web multi-surface preview) */}
+          <div className="flex lg:hidden items-center justify-between gap-1 pt-2.5 mt-2.5 border-t border-[#2A180D]">
+            <div className="flex items-center gap-1 overflow-x-auto">
+              {(
+                [
+                  { id: 'split-suite', label: 'All 4' },
+                  { id: 'guest-web', label: 'Guest' },
+                  { id: 'waiter-apk', label: 'Waiter' },
+                  { id: 'kitchen-apk', label: 'Kitchen' },
+                  { id: 'admin-apk', label: 'Admin' },
+                ] as Array<{ id: ActiveWorkspaceView; label: string }>
+              ).map((t) => (
                 <button
-                  key={lvl}
+                  key={t.id}
                   type="button"
-                  data-testid={`switch-level-${lvl}-btn`}
-                  onClick={() => handleSwitchLevel(lvl)}
-                  className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
-                    state.serviceLevel === lvl
+                  onClick={() => setView(t.id)}
+                  className={`px-2.5 py-1 rounded-[6px] text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
+                    view === t.id
                       ? 'bg-[#E8500C] text-[#FBEFE6]'
-                      : 'text-[#FBEFE6]/75 hover:text-[#FFFFFF]'
+                      : 'bg-[#2A180D] text-[#FBEFE6]/80'
                   }`}
                 >
-                  Level {lvl}
+                  {t.label}
                 </button>
               ))}
             </div>
@@ -725,37 +967,75 @@ export default function App() {
               type="button"
               onClick={toggleSound}
               aria-pressed={soundEnabled}
-              className="px-2.5 py-1 rounded-[8px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] font-mono-code text-[11px] cursor-pointer whitespace-nowrap"
+              className="px-2 py-1 rounded-[6px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[10px] font-semibold cursor-pointer shrink-0"
             >
-              {soundEnabled ? 'Chime Audio: ON' : 'Chime Audio: OFF'}
+              {soundEnabled ? 'Audio ON' : 'Audio OFF'}
             </button>
           </div>
-        </div>
-      </div>
+        </header>
+      )}
 
       {/* Main Product Workspace */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 md:px-6 py-6 flex flex-col gap-6">
-        {/* Surface 4: Owner / Admin Dedicated App (com.buildbros.admin) */}
+      <main
+        className={`flex-1 w-full mx-auto flex flex-col gap-5 ${
+          DEDICATED_APK_ROLE
+            ? 'max-w-[600px] p-0'
+            : 'max-w-[1440px] px-3 sm:px-6 py-4 sm:py-6'
+        }`}
+      >
+        {/* =====================================================================
+            SURFACE 4: OWNER / ADMIN APP (com.buildbros.admin)
+           ===================================================================== */}
         {(view === 'split-suite' || view === 'admin-apk') && (
           <section
             aria-label="Owner Admin Android APK"
-            className="bg-[#FFFFFF] rounded-[20px] border-2 border-[#1A0C06] overflow-hidden"
+            className={`bg-[#FFFFFF] overflow-hidden ${
+              DEDICATED_APK_ROLE
+                ? 'min-h-screen border-0'
+                : 'rounded-[20px] border-2 border-[#1A0C06]'
+            }`}
             data-testid="surface-admin-apk"
           >
-            <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-bold">
-                  OWNER ADMIN APP
-                </span>
-                <h2 className="text-[15px] font-semibold m-0">
-                  {state.venueName} · Live Menu, Floor &amp; Table QR Generator
+            <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold">
+                    OWNER ADMIN
+                  </span>
+                  <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-[#C4F042]">
+                    <span className="w-2 h-2 rounded-full bg-[#C4F042]" /> Live Cloud Sync
+                  </span>
+                </div>
+                <h2 className="text-[17px] font-bold m-0 mt-1">
+                  {state.venueName} · Controller
                 </h2>
               </div>
-              <div className="flex items-center gap-4 font-mono-code text-[12px]">
-                <span className="text-[#C4F042]">Sync: {state.lastSyncLatencyMs}ms</span>
-                <span>Active Table: #{state.activeTable}</span>
-                <span className="font-bold">
-                  Shift Revenue: {state.currencySymbol}
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Service Level Switcher inside Admin App so Owner APK always has it */}
+                <div
+                  className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
+                  role="group"
+                  aria-label="Admin Service Level Switcher"
+                >
+                  {([1, 2, 3] as ServiceLevel[]).map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      onClick={() => handleSwitchLevel(lvl)}
+                      className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-bold cursor-pointer ${
+                        state.serviceLevel === lvl
+                          ? 'bg-[#E8500C] text-[#FBEFE6]'
+                          : 'text-[#FBEFE6]/70'
+                      }`}
+                    >
+                      L{lvl}
+                    </button>
+                  ))}
+                </div>
+
+                <span className="px-2.5 py-1 rounded-[8px] bg-[#2A180D] font-mono-code text-[12px] font-bold text-[#C4F042]">
+                  {state.currencySymbol}
                   {shiftRevenue}
                 </span>
               </div>
@@ -765,9 +1045,9 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-1.5">
                 {(
                   [
-                    { id: 'menu', label: 'Instant Menu & 86 Editor' },
-                    { id: 'floor', label: `Live ${state.tables.length}-Table Floor Monitor` },
-                    { id: 'qr', label: 'Table QR Generator & Print Export' },
+                    { id: 'menu', label: 'Menu & 86 Editor' },
+                    { id: 'floor', label: `${state.tables.length}-Table Floor` },
+                    { id: 'qr', label: 'Table QR Generator' },
                   ] as const
                 ).map((t) => (
                   <button
@@ -789,18 +1069,18 @@ export default function App() {
               <button
                 type="button"
                 onClick={() =>
-                  setState((prev) => ({
+                  commitAndSync((prev) => ({
                     ...prev,
                     autoRouteToKitchen: !prev.autoRouteToKitchen,
                   }))
                 }
-                className={`px-3 py-1 rounded-[8px] font-mono-code text-[11px] font-semibold border cursor-pointer transition-colors whitespace-nowrap ${
+                className={`px-3 py-1.5 rounded-[8px] font-mono-code text-[11px] font-semibold border cursor-pointer transition-colors whitespace-nowrap ${
                   state.autoRouteToKitchen
                     ? 'bg-[#FFEEE3] border-[#E8500C] text-[#C03E0A]'
                     : 'bg-[#FFFFFF] border-[#E3D9D3] text-[#6C625C]'
                 }`}
               >
-                Skip Reception Gate (Auto-KDS): {state.autoRouteToKitchen ? 'ON' : 'OFF'}
+                Auto-Send to Kitchen: {state.autoRouteToKitchen ? 'ON' : 'OFF'}
               </button>
             </div>
 
@@ -887,7 +1167,9 @@ export default function App() {
                       <button
                         key={t.tableNumber}
                         type="button"
-                        onClick={() => setState((prev) => ({ ...prev, activeTable: t.tableNumber }))}
+                        onClick={() =>
+                          setState((prev) => ({ ...prev, activeTable: t.tableNumber }))
+                        }
                         className={`p-3 rounded-[14px] border text-left flex flex-col gap-1 cursor-pointer transition-colors ${
                           isSelected
                             ? 'bg-[#140905] text-[#FBEFE6] border-[#E8500C]'
@@ -942,28 +1224,30 @@ export default function App() {
           className={`grid gap-6 items-start ${
             view === 'split-suite'
               ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
-              : 'grid-cols-1 max-w-[560px] mx-auto w-full'
+              : 'grid-cols-1 w-full'
           }`}
         >
           {/* =====================================================================
               SURFACE 1: GUEST WEB MENU (SWIPE DECK + SUB-SECTIONS + CART VIEW)
-              Swipe Left = Skipped · Swipe Right = In Cart · Done Picking = Click Cart
-              Level 2 in Cart = Call the Waiter · Level 3 in Cart = Send the Order
              ===================================================================== */}
           {(view === 'split-suite' || view === 'guest-web') && (
             <section
               aria-label="Guest Web Menu"
-              className="bg-[#FFFFFF] rounded-[24px] border-2 border-[#1A0C06] overflow-hidden flex flex-col"
+              className={`bg-[#FFFFFF] overflow-hidden flex flex-col ${
+                DEDICATED_APK_ROLE
+                  ? 'min-h-screen border-0'
+                  : 'rounded-[24px] border-2 border-[#1A0C06]'
+              }`}
               data-testid="surface-guest-web"
             >
               {/* Top Venue Header + Cart Button */}
-              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3 border-b border-[#2A180D] flex items-center justify-between gap-2">
+              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3.5 border-b border-[#2A180D] flex items-center justify-between gap-2">
                 <div>
                   <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
-                    GUEST SWIPE DECK MENU · DEMO
+                    TABLE {state.activeTable} · SWIPE MENU · DEMO
                   </span>
-                  <h3 className="text-[15px] font-bold text-[#FBEFE6] m-0">
-                    {state.venueName} · Table {state.activeTable}
+                  <h3 className="text-[16px] font-bold text-[#FBEFE6] m-0">
+                    {state.venueName}
                   </h3>
                 </div>
 
@@ -979,7 +1263,7 @@ export default function App() {
                         soundFX.play('tap');
                         setGuestStep((prev) => (prev === 'cart' ? 'deck' : 'cart'));
                       }}
-                      className="px-3 py-1 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer tabular-nums"
+                      className="px-3 py-1.5 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer tabular-nums"
                     >
                       {guestStep === 'cart'
                         ? '← Deck'
@@ -991,7 +1275,7 @@ export default function App() {
 
               {guestStep === 'cart' && state.serviceLevel >= 2 ? (
                 /* ===============================================================
-                   GUEST CART VIEW (Opened when Done Picking -> Click the Cart)
+                   GUEST CART VIEW (Done Picking -> Click Cart)
                    Level 2 = "Call the Waiter" button
                    Level 3 = "Send the Order" button
                    =============================================================== */
@@ -1250,7 +1534,6 @@ export default function App() {
 
                   {guestDisplayMode === 'swipe' ? (
                     <div className="p-3.5 flex flex-col gap-3">
-                      {/* Deck Progress & Instructions Bar */}
                       <div className="flex items-center justify-between text-[11px] font-mono-code text-[#6C625C]">
                         <span>
                           {currentDeckDish
@@ -1260,7 +1543,6 @@ export default function App() {
                         <span>← Left: Skip · Right: In Cart →</span>
                       </div>
 
-                      {/* Last Swipe Feedback Pill */}
                       {lastSwipeFeedback && (
                         <div className="px-3 py-1 rounded-[8px] bg-[#F3ECE5] text-[11px] font-mono-code flex items-center justify-between">
                           <span>
@@ -1273,9 +1555,7 @@ export default function App() {
 
                       {currentDeckDish ? (
                         <>
-                          {/* Interactive Swipe Card Stack */}
                           <div className="relative h-[300px] w-full select-none">
-                            {/* Next card preview underneath */}
                             {nextDeckDish && (
                               <div
                                 aria-hidden="true"
@@ -1283,7 +1563,6 @@ export default function App() {
                               />
                             )}
 
-                            {/* Active Dish Card */}
                             <div
                               data-testid="active-swipe-dish-card"
                               onPointerDown={handlePointerDown}
@@ -1299,7 +1578,6 @@ export default function App() {
                               }}
                               className="relative h-full w-full rounded-[18px] bg-[#FFFFFF] border-2 border-[#1A0C06] overflow-hidden flex flex-col justify-between cursor-grab active:cursor-grabbing"
                             >
-                              {/* Swipe Stamp Overlays */}
                               {showAddStamp && (
                                 <div className="absolute top-3 left-3 z-20 px-3 py-1 rounded-[8px] bg-[#C4F042] text-[#140905] border-2 border-[#140905] font-mono-code text-[12px] font-bold uppercase tracking-wider">
                                   IN CART +
@@ -1311,7 +1589,6 @@ export default function App() {
                                 </div>
                               )}
 
-                              {/* Dish Visual Header */}
                               <div className="relative h-[145px] bg-[#140905] overflow-hidden">
                                 {currentDeckDish.imageUrl ? (
                                   <img
@@ -1361,7 +1638,6 @@ export default function App() {
                                 </div>
                               </div>
 
-                              {/* Dish Card Body */}
                               <div className="p-3.5 flex-1 flex flex-col justify-between bg-[#FFFFFF]">
                                 <p className="text-[12px] text-[#6C625C] leading-relaxed m-0 line-clamp-2">
                                   {currentDeckDish.description}
@@ -1387,7 +1663,6 @@ export default function App() {
                             </div>
                           </div>
 
-                          {/* Swipe Deck Action Controls: Left = Skip, Undo, Right = In Cart */}
                           <div className="grid grid-cols-7 gap-2 pt-1">
                             <button
                               type="button"
@@ -1422,7 +1697,6 @@ export default function App() {
                           </div>
                         </>
                       ) : (
-                        /* Deck Complete State ("Done Picking!") */
                         <div
                           data-testid="swipe-deck-complete"
                           className="p-5 rounded-[18px] bg-[#F7F2ED] border-2 border-[#1A0C06] text-center flex flex-col items-center gap-3"
@@ -1469,7 +1743,6 @@ export default function App() {
                       )}
                     </div>
                   ) : (
-                    /* Optional Compact List View */
                     <div className="p-3.5 flex flex-col gap-2.5 max-h-[340px] overflow-y-auto">
                       {filteredDishes.map((dish) => {
                         const inCart = state.cart.find((c) => c.dish.id === dish.id);
@@ -1522,7 +1795,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Guest Sticky Bottom Bar: Done Picking -> Click the Cart */}
+                  {/* Guest Sticky Bottom Bar */}
                   <div className="p-3.5 bg-[#F7F2ED] border-t border-[#E3D9D3] flex flex-col gap-2">
                     {state.serviceLevel === 1 ? (
                       <div className="flex items-center justify-between text-[12px] text-[#6C625C]">
@@ -1552,159 +1825,269 @@ export default function App() {
             </section>
           )}
 
-          {/* Surface 2: Waiter Dedicated App (com.buildbros.waiter) */}
+          {/* =====================================================================
+              SURFACE 2: WAITER STAFF APP (com.buildbros.waiter)
+              Full-bleed mobile design, live Pass Pickup + Table Calls + Native Push
+             ===================================================================== */}
           {(view === 'split-suite' || view === 'waiter-apk') && (
             <section
               aria-label="Waiter Dedicated Android APK"
-              className="bg-[#140905] text-[#FBEFE6] rounded-[24px] border-2 border-[#2A180D] overflow-hidden flex flex-col"
+              className={`bg-[#140905] text-[#FBEFE6] overflow-hidden flex flex-col ${
+                DEDICATED_APK_ROLE
+                  ? 'min-h-screen border-0'
+                  : 'rounded-[24px] border-2 border-[#2A180D]'
+              }`}
               data-testid="surface-waiter-apk"
             >
-              <div className="bg-[#2A180D] px-4 py-3 border-b border-[#F7F2ED]/10 flex items-center justify-between">
+              {/* Waiter App Top Header */}
+              <div className="bg-[#1A0C06] px-4 py-3.5 border-b border-[#FBEFE6]/12 flex items-center justify-between gap-2">
                 <div>
-                  <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
-                    WAITER STAFF APP
-                  </span>
-                  <h3 className="text-[15px] font-bold text-[#FBEFE6] m-0">
-                    Floor Calls &amp; Kitchen Pass Pickup
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#C4F042]" />
+                    <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] tracking-wider">
+                      WAITER HANDHELD · LIVE SYNC
+                    </span>
+                  </div>
+                  <h3 className="text-[17px] font-bold text-[#FBEFE6] m-0 mt-0.5">
+                    {state.venueName}
                   </h3>
-                </div>
-                <span className="px-2 py-0.5 rounded-[6px] bg-[#140905] text-[#C4F042] font-mono-code text-[10px] font-semibold">
-                  FCM Wake Lock
-                </span>
-              </div>
-
-              <div className="px-3.5 py-2 bg-[#1A0C06] border-b border-[#F7F2ED]/10 flex items-center justify-between gap-1.5">
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setWaiterTab('calls')}
-                    className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
-                      waiterTab === 'calls'
-                        ? 'bg-[#E8500C] text-[#FBEFE6]'
-                        : 'bg-[#2A180D] text-[#FBEFE6]/75'
-                    }`}
-                  >
-                    Calls ({pendingCalls.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWaiterTab('pickup')}
-                    className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
-                      waiterTab === 'pickup'
-                        ? 'bg-[#E8500C] text-[#FBEFE6]'
-                        : 'bg-[#2A180D] text-[#FBEFE6]/75'
-                    }`}
-                  >
-                    Pass Pickup ({readyOrders.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWaiterTab('floor')}
-                    className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
-                      waiterTab === 'floor'
-                        ? 'bg-[#E8500C] text-[#FBEFE6]'
-                        : 'bg-[#2A180D] text-[#FBEFE6]/75'
-                    }`}
-                  >
-                    Floor Map
-                  </button>
                 </div>
 
                 <button
                   type="button"
+                  data-testid="waiter-test-alert-btn"
                   onClick={() => {
-                    soundFX.play('waiterCall');
-                    pushLog(
-                      'com.buildbros.waiter',
-                      'fcm:waiter_calls_urgent',
-                      'Test Push Chime Fired',
-                      'Verified Android wake-lock sound & vibration [0, 400, 200, 400]'
+                    soundFX.play('kitchenReady');
+                    triggerUrgentDeviceNotification(
+                      'TEST ALERT · Waiter Handheld Active',
+                      'Android system notification, audio chime & vibration verified.'
                     );
+                    setLiveToast({
+                      title: 'Waiter Push Notification Active',
+                      body: 'Vibration & sound chime verified on this phone.',
+                    });
+                    window.setTimeout(() => setLiveToast(null), 3500);
                   }}
-                  className="px-2 py-1 rounded-[6px] bg-[#2A180D] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-semibold cursor-pointer whitespace-nowrap"
+                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#C4F042] hover:text-[#FFFFFF] font-mono-code text-[11px] font-bold cursor-pointer transition-colors shrink-0"
                 >
-                  Chime
+                  Test Push Alert
                 </button>
               </div>
 
-              <div className="p-3.5 flex flex-col gap-3 max-h-[420px] overflow-y-auto">
-                {waiterTab === 'calls' &&
-                  state.waiterCalls.map((call) => (
-                    <div
-                      key={call.id}
-                      className={`p-3.5 rounded-[14px] border flex flex-col gap-2 ${
-                        call.status === 'pending'
-                          ? 'bg-[#2A180D] border-[#E8500C]'
-                          : 'bg-[#1A0C06] border-[#F7F2ED]/15'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-[15px]">Table {call.tableNumber}</span>
-                        <span
-                          className={`px-2 py-0.5 rounded-[6px] font-mono-code text-[10px] font-semibold ${
-                            call.status === 'pending'
-                              ? 'bg-[#E8500C] text-[#FBEFE6]'
-                              : 'bg-[#140905] text-[#C4F042]'
-                          }`}
+              {/* 3 Large, High-Contrast Staff Navigation Tabs */}
+              <div className="p-2.5 bg-[#1A0C06] border-b border-[#FBEFE6]/10 grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  data-testid="waiter-tab-pickup"
+                  onClick={() => setWaiterTab('pickup')}
+                  className={`py-2.5 px-2 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer transition-colors flex items-center justify-center gap-1.5 ${
+                    waiterTab === 'pickup'
+                      ? 'bg-[#C4F042] text-[#140905]'
+                      : readyOrders.length > 0
+                      ? 'bg-[#2A180D] text-[#C4F042] border border-[#C4F042]'
+                      : 'bg-[#2A180D] text-[#FBEFE6]/75'
+                  }`}
+                >
+                  <span>Pass Pickup</span>
+                  <span className="px-1.5 py-0.5 rounded bg-black/25 text-[11px]">
+                    {readyOrders.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="waiter-tab-calls"
+                  onClick={() => setWaiterTab('calls')}
+                  className={`py-2.5 px-2 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer transition-colors flex items-center justify-center gap-1.5 ${
+                    waiterTab === 'calls'
+                      ? 'bg-[#E8500C] text-[#FBEFE6]'
+                      : pendingCalls.length > 0
+                      ? 'bg-[#2A180D] text-[#FF8741] border border-[#E8500C]'
+                      : 'bg-[#2A180D] text-[#FBEFE6]/75'
+                  }`}
+                >
+                  <span>Table Calls</span>
+                  <span className="px-1.5 py-0.5 rounded bg-black/25 text-[11px]">
+                    {pendingCalls.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="waiter-tab-floor"
+                  onClick={() => setWaiterTab('floor')}
+                  className={`py-2.5 px-2 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer transition-colors ${
+                    waiterTab === 'floor'
+                      ? 'bg-[#FBEFE6] text-[#140905]'
+                      : 'bg-[#2A180D] text-[#FBEFE6]/75'
+                  }`}
+                >
+                  Floor ({state.tables.length})
+                </button>
+              </div>
+
+              {/* Waiter Content Area */}
+              <div className="p-4 flex-1 flex flex-col gap-3">
+                {/* Cross-Tab Urgent Banner so Waiter NEVER misses a Ready Pickup or Table Call */}
+                {waiterTab !== 'pickup' && readyOrders.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setWaiterTab('pickup')}
+                    className="w-full p-3 rounded-[12px] bg-[#C4F042] text-[#140905] font-mono-code text-[12px] font-bold flex items-center justify-between cursor-pointer"
+                  >
+                    <span>
+                      ● {readyOrders.length} ORDER{readyOrders.length > 1 ? 'S' : ''} READY AT
+                      KITCHEN PASS!
+                    </span>
+                    <span>View Pickup →</span>
+                  </button>
+                )}
+
+                {waiterTab !== 'calls' && pendingCalls.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setWaiterTab('calls')}
+                    className="w-full p-3 rounded-[12px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold flex items-center justify-between cursor-pointer"
+                  >
+                    <span>
+                      ● {pendingCalls.length} TABLE CALL{pendingCalls.length > 1 ? 'S' : ''}{' '}
+                      WAITING!
+                    </span>
+                    <span>View Calls →</span>
+                  </button>
+                )}
+
+                {/* TAB 1: KITCHEN PASS PICKUP (Ready Orders from Kitchen KDS) */}
+                {waiterTab === 'pickup' && (
+                  <div className="flex flex-col gap-3" data-testid="waiter-pickup-list">
+                    {readyOrders.length === 0 ? (
+                      <div className="p-6 rounded-[16px] bg-[#1A0C06] border border-[#FBEFE6]/10 text-center flex flex-col items-center gap-2">
+                        <div className="font-semibold text-[14px] text-[#FBEFE6]">
+                          No dishes waiting at the kitchen pass right now.
+                        </div>
+                        <p className="text-[12px] text-[#FBEFE6]/65 m-0 max-w-[320px]">
+                          As soon as Kitchen KDS marks a ticket <strong>READY</strong>, it pops up
+                          here with an audio chime and phone notification.
+                        </p>
+                      </div>
+                    ) : (
+                      readyOrders.map((ord) => (
+                        <div
+                          key={ord.id}
+                          data-testid={`waiter-ready-ticket-${ord.ticketNumber.replace('#', '')}`}
+                          className="p-4 rounded-[16px] bg-[#2A180D] border-2 border-[#C4F042] flex flex-col gap-3"
                         >
-                          {call.status === 'pending' ? 'URGENT · Waiter Call' : 'On My Way · Claimed'}
-                        </span>
-                      </div>
-                      <div className="text-[12px] text-[#FBEFE6]/80">
-                        {call.cartSnapshot.map((i) => `${i.qty}x ${i.dish.name}`).join(', ')}
-                      </div>
-                      <div className="flex items-center justify-between pt-2 border-t border-[#F7F2ED]/10">
-                        <span className="font-mono-code text-[12px] font-bold tabular-nums">
-                          Cart {state.currencySymbol}
-                          {call.cartTotal}
-                        </span>
-                        {call.status === 'pending' && (
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <span className="px-2 py-0.5 rounded bg-[#C4F042] text-[#140905] font-mono-code text-[10px] font-bold uppercase">
+                                READY AT KITCHEN PASS
+                              </span>
+                              <div className="font-mono-code font-bold text-[18px] text-[#FFFFFF] mt-1">
+                                {ord.ticketNumber} · Table {ord.tableNumber}
+                              </div>
+                            </div>
+                            <span className="font-mono-code text-[13px] font-bold text-[#C4F042]">
+                              {state.currencySymbol}
+                              {ord.totalAmount}
+                            </span>
+                          </div>
+
+                          <div className="p-3 rounded-[10px] bg-[#140905] flex flex-col gap-1.5 text-[13px]">
+                            {ord.items.map((i) => (
+                              <div key={i.dish.id} className="flex justify-between font-medium">
+                                <span>
+                                  <strong className="text-[#C4F042]">{i.qty}×</strong>{' '}
+                                  {i.dish.name}
+                                </span>
+                                <span className="font-mono-code text-[#FBEFE6]/70">
+                                  {state.currencySymbol}
+                                  {i.dish.price * i.qty}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+
                           <button
                             type="button"
-                            data-testid={`waiter-ack-${call.tableNumber}-btn`}
-                            onClick={() => handleWaiterAcknowledge(call.id)}
-                            className="px-3 py-1.5 rounded-[8px] bg-[#C4F042] text-[#140905] font-bold text-[12px] cursor-pointer"
+                            data-testid={`waiter-serve-${ord.ticketNumber.replace('#', '')}-btn`}
+                            onClick={() => handleWaiterServeOrder(ord.id)}
+                            className="w-full h-11 rounded-[10px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer"
                           >
-                            On My Way
+                            ✓ Mark Served at Table {ord.tableNumber}
                           </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
 
-                {waiterTab === 'pickup' &&
-                  (readyOrders.length === 0 ? (
-                    <div className="py-8 text-center text-[13px] text-[#FBEFE6]/60">
-                      No tickets waiting at the kitchen pass right now.
-                    </div>
-                  ) : (
-                    readyOrders.map((ord) => (
-                      <div
-                        key={ord.id}
-                        className="p-3.5 rounded-[14px] bg-[#2A180D] border border-[#C4F042] flex flex-col gap-2"
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-mono-code font-bold text-[14px] text-[#C4F042]">
-                            PICKUP {ord.ticketNumber} · Table {ord.tableNumber}
-                          </span>
-                          <span className="font-mono-code text-[11px]">Ready at Pass</span>
-                        </div>
-                        <div className="text-[12px] text-[#FBEFE6]/90">
-                          {ord.items.map((i) => `${i.qty}x ${i.dish.name}`).join(', ')}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleWaiterServeOrder(ord.id)}
-                          className="w-full h-9 rounded-[8px] bg-[#C4F042] text-[#140905] font-bold text-[12px] cursor-pointer mt-1"
+                {/* TAB 2: TABLE CALLS */}
+                {waiterTab === 'calls' && (
+                  <div className="flex flex-col gap-3" data-testid="waiter-calls-list">
+                    {state.waiterCalls.length === 0 ? (
+                      <div className="p-6 rounded-[16px] bg-[#1A0C06] border border-[#FBEFE6]/10 text-center text-[13px] text-[#FBEFE6]/65">
+                        No active waiter calls right now.
+                      </div>
+                    ) : (
+                      state.waiterCalls.map((call) => (
+                        <div
+                          key={call.id}
+                          className={`p-4 rounded-[16px] border-2 flex flex-col gap-2.5 ${
+                            call.status === 'pending'
+                              ? 'bg-[#2A180D] border-[#E8500C]'
+                              : 'bg-[#1A0C06] border-[#FBEFE6]/15'
+                          }`}
                         >
-                          Mark Served at Table {ord.tableNumber}
-                        </button>
-                      </div>
-                    ))
-                  ))}
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-[17px]">
+                              Table {call.tableNumber}
+                            </span>
+                            <span
+                              className={`px-2.5 py-0.5 rounded-[6px] font-mono-code text-[10px] font-bold uppercase ${
+                                call.status === 'pending'
+                                  ? 'bg-[#E8500C] text-[#FBEFE6]'
+                                  : 'bg-[#140905] text-[#C4F042]'
+                              }`}
+                            >
+                              {call.status === 'pending'
+                                ? 'URGENT · NEEDS WAITER'
+                                : '✓ ON MY WAY'}
+                            </span>
+                          </div>
 
+                          <div className="p-2.5 rounded-[10px] bg-[#140905] text-[12px] text-[#FBEFE6]/90">
+                            {call.cartSnapshot.length > 0
+                              ? call.cartSnapshot
+                                  .map((i) => `${i.qty}x ${i.dish.name}`)
+                                  .join(', ')
+                              : 'Guest requested waiter assistance at table'}
+                          </div>
+
+                          <div className="flex items-center justify-between pt-1">
+                            <span className="font-mono-code text-[13px] font-bold text-[#C4F042] tabular-nums">
+                              Cart Total: {state.currencySymbol}
+                              {call.cartTotal}
+                            </span>
+                            {call.status === 'pending' && (
+                              <button
+                                type="button"
+                                data-testid={`waiter-ack-${call.tableNumber}-btn`}
+                                onClick={() => handleWaiterAcknowledge(call.id)}
+                                className="px-4 py-2 rounded-[10px] bg-[#C4F042] text-[#140905] font-mono-code font-bold text-[12px] uppercase cursor-pointer"
+                              >
+                                On My Way →
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {/* TAB 3: FLOOR MAP */}
                 {waiterTab === 'floor' && (
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
                     {state.tables.map((t) => (
                       <button
                         key={t.tableNumber}
@@ -1712,14 +2095,18 @@ export default function App() {
                         onClick={() =>
                           setState((prev) => ({ ...prev, activeTable: t.tableNumber }))
                         }
-                        className={`p-2.5 rounded-[10px] border text-left cursor-pointer ${
-                          state.activeTable === t.tableNumber
-                            ? 'bg-[#E8500C] border-[#FBEFE6]'
-                            : 'bg-[#1A0C06] border-[#F7F2ED]/15'
+                        className={`p-3 rounded-[12px] border text-left cursor-pointer ${
+                          t.status === 'ready'
+                            ? 'bg-[#2A180D] border-[#C4F042] text-[#C4F042]'
+                            : t.status === 'waiter_called'
+                            ? 'bg-[#2A180D] border-[#E8500C] text-[#FF8741]'
+                            : 'bg-[#1A0C06] border-[#FBEFE6]/15 text-[#FBEFE6]'
                         }`}
                       >
-                        <div className="font-mono-code font-bold text-[12px]">T{t.tableNumber}</div>
-                        <div className="text-[10px] capitalize truncate opacity-80">
+                        <div className="font-mono-code font-bold text-[14px]">
+                          Table {t.tableNumber}
+                        </div>
+                        <div className="text-[11px] capitalize mt-0.5 opacity-90">
                           {t.status.replace('_', ' ')}
                         </div>
                       </button>
@@ -1730,70 +2117,117 @@ export default function App() {
             </section>
           )}
 
-          {/* Surface 3: Kitchen & Reception Dedicated App (com.buildbros.kitchen) */}
+          {/* =====================================================================
+              SURFACE 3: KITCHEN & RECEPTION KDS APP (com.buildbros.kitchen)
+              Direct 4-Stage KDS Board — Tapping READY alerts Waiter App live!
+             ===================================================================== */}
           {(view === 'split-suite' || view === 'kitchen-apk') && (
             <section
               aria-label="Kitchen and Reception KDS Android APK"
-              className="bg-[#FFFFFF] text-[#1A0C06] rounded-[24px] border-2 border-[#E3D9D3] overflow-hidden flex flex-col"
+              className={`bg-[#FFFFFF] text-[#1A0C06] overflow-hidden flex flex-col ${
+                DEDICATED_APK_ROLE
+                  ? 'min-h-screen border-0'
+                  : 'rounded-[24px] border-2 border-[#1A0C06]'
+              }`}
               data-testid="surface-kitchen-apk"
             >
-              <div className="bg-[#F7F2ED] px-4 py-3 border-b border-[#E3D9D3] flex items-center justify-between">
+              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3.5 border-b border-[#2A180D] flex items-center justify-between gap-2">
                 <div>
-                  <span className="font-mono-code text-[10px] font-bold uppercase text-[#C03E0A] block">
-                    KITCHEN &amp; RECEPTION KDS
-                  </span>
-                  <h3 className="text-[15px] font-bold text-[#1A0C06] m-0">
-                    4-Stage Ticket Board
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#C4F042]" />
+                    <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042]">
+                      KITCHEN &amp; RECEPTION KDS
+                    </span>
+                  </div>
+                  <h3 className="text-[17px] font-bold text-[#FBEFE6] m-0 mt-0.5">
+                    Live Ticket Board ({state.orders.filter((o) => o.status !== 'served').length}{' '}
+                    Active)
                   </h3>
                 </div>
-                <span className="px-2 py-0.5 rounded-[6px] bg-[#FFEEE3] text-[#C03E0A] font-mono-code text-[10px] font-semibold">
-                  Keep-Awake KDS
-                </span>
+
+                <button
+                  type="button"
+                  data-testid="kitchen-spawn-ticket-btn"
+                  onClick={handleSpawnFreshKitchenTicket}
+                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#C4F042] hover:text-[#FFFFFF] font-mono-code text-[11px] font-bold cursor-pointer transition-colors shrink-0"
+                >
+                  + New Test Ticket
+                </button>
               </div>
 
-              <div className="p-3.5 flex flex-col gap-3 max-h-[420px] overflow-y-auto">
+              <div className="p-4 flex-1 flex flex-col gap-3.5">
                 {state.orders.map((ord) => {
-                  const stages: Array<typeof ord.status> = ['new', 'cooking', 'ready', 'served'];
+                  const stages: Array<KitchenOrder['status']> = [
+                    'new',
+                    'cooking',
+                    'ready',
+                    'served',
+                  ];
                   return (
                     <div
                       key={ord.id}
-                      className="p-3.5 rounded-[16px] bg-[#F7F2ED] border border-[#E3D9D3] flex flex-col gap-2.5"
+                      data-testid={`kitchen-ticket-${ord.ticketNumber.replace('#', '')}`}
+                      className={`p-4 rounded-[18px] border-2 flex flex-col gap-3 ${
+                        ord.status === 'ready'
+                          ? 'bg-[#F7F2ED] border-[#140905]'
+                          : ord.status === 'served'
+                          ? 'bg-[#F3ECE5]/60 border-[#E3D9D3] opacity-65'
+                          : 'bg-[#F7F2ED] border-[#E8500C]'
+                      }`}
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono-code font-bold text-[15px]">
+                          <span className="font-mono-code font-bold text-[18px] text-[#140905]">
                             {ord.ticketNumber}
                           </span>
-                          <span className="text-[13px] font-semibold text-[#6C625C]">
-                            · Table {ord.tableNumber}
+                          <span className="px-2.5 py-0.5 rounded-[6px] bg-[#140905] text-[#FBEFE6] font-mono-code text-[12px] font-bold">
+                            Table {ord.tableNumber}
                           </span>
                         </div>
-                        <span className="px-2.5 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-semibold uppercase">
+                        <span
+                          className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-bold uppercase ${
+                            ord.status === 'ready'
+                              ? 'bg-[#C4F042] text-[#140905]'
+                              : ord.status === 'served'
+                              ? 'bg-[#E3D9D3] text-[#6C625C]'
+                              : 'bg-[#E8500C] text-[#FBEFE6]'
+                          }`}
+                        >
                           {ord.status}
                         </span>
                       </div>
 
-                      {/* 4-Stage KDS Progress Bar */}
-                      <div className="grid grid-cols-4 gap-1">
+                      {/* Interactive 4-Stage KDS Selector Buttons (Tap any stage directly!) */}
+                      <div
+                        className="grid grid-cols-4 gap-1.5"
+                        role="group"
+                        aria-label={`Set stage for ticket ${ord.ticketNumber}`}
+                      >
                         {stages.map((st) => (
-                          <div
+                          <button
                             key={st}
-                            className={`text-center py-1 rounded-[6px] text-[10px] font-mono-code font-semibold uppercase ${
+                            type="button"
+                            data-testid={`kds-stage-${ord.ticketNumber.replace('#', '')}-${st}`}
+                            onClick={() => handleKitchenSetOrderStatus(ord.id, st)}
+                            className={`py-1.5 rounded-[8px] text-[10px] font-mono-code font-bold uppercase cursor-pointer transition-colors ${
                               ord.status === st
-                                ? 'bg-[#1A0C06] text-[#FBEFE6]'
-                                : 'bg-[#F3ECE5] text-[#6C625C]'
+                                ? st === 'ready'
+                                  ? 'bg-[#C4F042] text-[#140905] border border-[#140905]'
+                                  : 'bg-[#140905] text-[#FBEFE6]'
+                                : 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#6C625C] hover:text-[#140905]'
                             }`}
                           >
                             {st}
-                          </div>
+                          </button>
                         ))}
                       </div>
 
-                      <div className="flex flex-col gap-1 text-[13px]">
+                      <div className="p-3 rounded-[12px] bg-[#FFFFFF] border border-[#E3D9D3] flex flex-col gap-1.5 text-[13px]">
                         {ord.items.map((item) => (
-                          <div key={item.dish.id} className="flex justify-between font-medium">
+                          <div key={item.dish.id} className="flex justify-between font-semibold">
                             <span>
-                              {item.qty}x {item.dish.name}
+                              <strong className="text-[#C03E0A]">{item.qty}×</strong>{' '}
+                              {item.dish.name}
                             </span>
                             <span className="font-mono-code text-[#6C625C] tabular-nums">
                               {state.currencySymbol}
@@ -1806,25 +2240,37 @@ export default function App() {
                       {!ord.receptionConfirmed && ord.status === 'incoming' ? (
                         <button
                           type="button"
-                          onClick={() => handleReceptionConfirm(ord.id)}
-                          className="w-full h-9 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-semibold text-[12px] cursor-pointer transition-colors"
+                          data-testid={`kds-confirm-${ord.ticketNumber.replace('#', '')}-btn`}
+                          onClick={() => handleKitchenSetOrderStatus(ord.id, 'new')}
+                          className="w-full h-11 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer transition-colors"
                         >
-                          Reception Gate: Confirm Order {ord.ticketNumber}
+                          Reception Gate: Confirm Order {ord.ticketNumber} →
+                        </button>
+                      ) : ord.status !== 'served' ? (
+                        <button
+                          type="button"
+                          data-testid={`kds-advance-${ord.ticketNumber.replace('#', '')}-btn`}
+                          onClick={() => handleKitchenAdvance(ord.id)}
+                          className={`w-full h-11 rounded-[10px] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer transition-colors ${
+                            ord.status === 'cooking'
+                              ? 'bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] border-2 border-[#140905]'
+                              : 'bg-[#140905] hover:bg-[#E8500C] text-[#FBEFE6]'
+                          }`}
+                        >
+                          {ord.status === 'new'
+                            ? `Start Cooking ${ord.ticketNumber} →`
+                            : ord.status === 'cooking'
+                            ? `🔔 Mark Dish Ready (Alert Waiter App) →`
+                            : `✓ Mark Served at Table ${ord.tableNumber}`}
                         </button>
                       ) : (
-                        ord.status !== 'served' && (
-                          <button
-                            type="button"
-                            onClick={() => handleKitchenAdvance(ord.id)}
-                            className="w-full h-9 rounded-[8px] bg-[#1A0C06] hover:bg-[#E8500C] text-[#FBEFE6] font-semibold text-[12px] cursor-pointer transition-colors"
-                          >
-                            {ord.status === 'new'
-                              ? 'Start Cooking'
-                              : ord.status === 'cooking'
-                              ? 'Mark Ready (Alert Waiter App)'
-                              : 'Mark Served'}
-                          </button>
-                        )
+                        <button
+                          type="button"
+                          onClick={() => handleKitchenSetOrderStatus(ord.id, 'cooking')}
+                          className="w-full h-9 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#6C625C] font-mono-code text-[11px] font-semibold cursor-pointer"
+                        >
+                          ↺ Reopen Ticket to Cooking
+                        </button>
                       )}
                     </div>
                   );
@@ -1833,40 +2279,6 @@ export default function App() {
             </section>
           )}
         </div>
-
-        {/* Live Supabase WebSocket & FCM Push Event Feed */}
-        <section
-          aria-label="Live Supabase Realtime and FCM Push Stream"
-          className="p-4 rounded-[18px] bg-[#140905] text-[#FBEFE6] border border-[#2A180D] flex flex-col gap-2.5"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#F7F2ED]/10 pb-2">
-            <span className="font-mono-code text-[12px] font-bold text-[#C4F042] uppercase">
-              Live Supabase Realtime &amp; FCM Push Event Stream
-            </span>
-            <span className="font-mono-code text-[11px] text-[#FBEFE6]/60">
-              postgres_changes · waiter_calls_urgent · kitchen_pass_bell
-            </span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-            {state.pushEvents.slice(0, 3).map((evt) => (
-              <div
-                key={evt.id}
-                className="p-2.5 rounded-[12px] bg-[#2A180D]/80 border border-[#F7F2ED]/10 flex flex-col gap-1"
-              >
-                <div className="flex items-center justify-between text-[10px] font-mono-code text-[#FF8741]">
-                  <span>{evt.targetApk}</span>
-                  <span className="tabular-nums">
-                    {evt.latencyMs}ms · {evt.timestamp}
-                  </span>
-                </div>
-                <div className="font-semibold text-[12px] text-[#FBEFE6] truncate">
-                  {evt.title}
-                </div>
-                <div className="text-[11px] text-[#FBEFE6]/75 truncate">{evt.body}</div>
-              </div>
-            ))}
-          </div>
-        </section>
       </main>
     </div>
   );

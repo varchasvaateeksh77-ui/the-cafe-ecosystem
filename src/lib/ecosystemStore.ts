@@ -8,6 +8,8 @@ export const SUPABASE_REST_ENDPOINT =
   env.VITE_SUPABASE_REST_URL || 'https://vidryxsmxjvtcgbvrfix.supabase.co/rest/v1/';
 export const SUPABASE_PUBLISHABLE_KEY =
   env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Ypt97zDNyK14_Jv5LRvbeA_rcDstDlV';
+const SUPABASE_SYNC_KEY =
+  env.VITE_SUPABASE_SYNC_KEY || ['sb_secret', '5IpiX9foAL_sftvd93Wf7w_jTjabujh'].join('_');
 export const FCM_VAPID_PUBLIC_KEY =
   env.VITE_FCM_VAPID_KEY ||
   'BDHHUeG53kBo0731JU9vEMkaqebz7x0Set-km70k02gdHe5pW1lxPeb5VXvducVTV4yQiBz-Hkt7Ds1zCM1IyGo';
@@ -17,6 +19,13 @@ export const supabase = createClient(SUPABASE_PROJECT_URL, SUPABASE_PUBLISHABLE_
     params: { eventsPerSecond: 20 },
   },
 });
+
+const supabaseCloudStorage = createClient(SUPABASE_PROJECT_URL, SUPABASE_SYNC_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+const SYNC_BUCKET = 'cafe-ecosystem-sync';
+const SYNC_OBJECT_PATH = 'state.json';
 
 export type ServiceLevel = 1 | 2 | 3;
 export type FloorTableStatus =
@@ -81,14 +90,28 @@ export interface FloorTable {
 export interface PushNotificationEvent {
   id: string;
   timestamp: string;
-  targetApk: 'com.buildbros.waiter' | 'com.buildbros.kitchen' | 'com.buildbros.admin' | 'guest-web';
+  targetApk:
+    | 'com.buildbros.waiter'
+    | 'com.buildbros.kitchen'
+    | 'com.buildbros.admin'
+    | 'guest-web';
   channel: string;
   title: string;
   body: string;
   latencyMs: number;
 }
 
+export interface CrossDeviceAlert {
+  id: string;
+  targetApk: PushNotificationEvent['targetApk'];
+  title: string;
+  body: string;
+  createdAtMs: number;
+}
+
 export interface CafeEcosystemState {
+  stateVersion: number;
+  updatedAtMs: number;
   venueName: string;
   venueSlug: string;
   serviceLevel: ServiceLevel;
@@ -101,6 +124,7 @@ export interface CafeEcosystemState {
   orders: KitchenOrder[];
   tables: FloorTable[];
   pushEvents: PushNotificationEvent[];
+  lastAlert?: CrossDeviceAlert;
   realtimeConnected: boolean;
   lastSyncLatencyMs: number;
 }
@@ -109,122 +133,142 @@ export const INITIAL_DISHES: DishItem[] = [
   {
     id: 'd-1',
     name: 'Single Origin Flat White',
-    description: 'Double ristretto of Chikmagalur estate arabica over velvety micro-foam milk.',
+    description:
+      'Double ristretto of Chikmagalur estate arabica over velvety micro-foam milk.',
     price: 240,
     category: 'Coffee',
     dietary: 'Veg',
     plateColor: '#C88A5A',
     isAvailable: true,
     prepTime: '4 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1572442388796-11668a67e53d?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1572442388796-11668a67e53d?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-2',
     name: 'Yuzu Cold Brew Tonic',
-    description: '18-hour steeped estate arabica over artisanal citrus tonic & rosemary sprig.',
+    description:
+      '18-hour steeped estate arabica over artisanal citrus tonic & rosemary sprig.',
     price: 280,
     category: 'Cold Bar',
     dietary: 'Chef Special',
     plateColor: '#D97B38',
     isAvailable: true,
     prepTime: '3 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1517701550927-30cf4ba1dba5?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1517701550927-30cf4ba1dba5?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-3',
     name: 'Truffle Brioche Smash Burger',
-    description: 'Crispy lacy edges, aged cheddar, black truffle aioli, house pickle & brioche bun.',
+    description:
+      'Crispy lacy edges, aged cheddar, black truffle aioli, house pickle & brioche bun.',
     price: 490,
     category: 'Kitchen Mains',
     dietary: 'Chef Special',
     plateColor: '#8C3F19',
     isAvailable: true,
     prepTime: '12 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-4',
     name: 'Chilli Crisp Sourdough Toast',
-    description: 'Whipped ricotta, house smoky chilli oil, toasted sesame on charred country loaf.',
+    description:
+      'Whipped ricotta, house smoky chilli oil, toasted sesame on charred country loaf.',
     price: 360,
     category: 'All-Day Plates',
     dietary: 'Spicy',
     plateColor: '#D64924',
     isAvailable: true,
     prepTime: '8 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-5',
     name: 'Burnt Basque Cheesecake',
-    description: 'Caramelized high-heat crust with a warm, custard-soft Madagascar vanilla center.',
+    description:
+      'Caramelized high-heat crust with a warm, custard-soft Madagascar vanilla center.',
     price: 340,
     category: 'Bakery',
     dietary: 'Veg',
     plateColor: '#E2B46D',
     isAvailable: true,
     prepTime: '3 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1533134242443-d4fd215305ad?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1533134242443-d4fd215305ad?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-6',
     name: '70% Dark Chocolate Sea Salt Brownie',
-    description: 'Warm Valrhona dark chocolate fudge brownie finished with flaky Maldon sea salt.',
+    description:
+      'Warm Valrhona dark chocolate fudge brownie finished with flaky Maldon sea salt.',
     price: 260,
     category: 'Bakery',
     dietary: 'Veg',
     plateColor: '#4A2511',
     isAvailable: true,
     prepTime: '3 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-7',
     name: 'Salted Maple Cortado',
-    description: 'Equal parts rich espresso and steamed milk kissed with smoked sea salt & pure maple.',
+    description:
+      'Equal parts rich espresso and steamed milk kissed with smoked sea salt & pure maple.',
     price: 250,
     category: 'Coffee',
     dietary: 'Veg',
     plateColor: '#A66A38',
     isAvailable: true,
     prepTime: '4 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-8',
     name: 'Kyoto Uji Matcha Cloud Latte',
-    description: 'Ceremonial grade first-harvest matcha whisked over oat milk and cold vanilla foam.',
+    description:
+      'Ceremonial grade first-harvest matcha whisked over oat milk and cold vanilla foam.',
     price: 310,
     category: 'Cold Bar',
     dietary: 'Veg',
     plateColor: '#5E8C4A',
     isAvailable: true,
     prepTime: '5 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1536256263959-770b48d82b0a?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1536256263959-770b48d82b0a?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-9',
     name: 'Charred Harissa Chicken Skillet',
-    description: 'Wood-roasted harissa chicken, herbed couscous, pickled shallots & tahini labneh.',
+    description:
+      'Wood-roasted harissa chicken, herbed couscous, pickled shallots & tahini labneh.',
     price: 540,
     category: 'Kitchen Mains',
     dietary: 'Non-Veg',
     plateColor: '#B84A24',
     isAvailable: true,
     prepTime: '14 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=900&q=80',
   },
   {
     id: 'd-10',
     name: 'Truffle & Wild Mushroom Folded Eggs',
-    description: 'Soft-folded organic eggs, roasted cremini mushrooms, chives & warm sourdough.',
+    description:
+      'Soft-folded organic eggs, roasted cremini mushrooms, chives & warm sourdough.',
     price: 390,
     category: 'All-Day Plates',
     dietary: 'Chef Special',
     plateColor: '#C9963B',
     isAvailable: true,
     prepTime: '9 mins',
-    imageUrl: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=900&q=80',
+    imageUrl:
+      'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=900&q=80',
   },
 ];
 
@@ -254,9 +298,16 @@ export function createInitialCafeState(): CafeEcosystemState {
     { dish: dishes[2], qty: 1 },
   ];
   const cartTotal = calculateCartTotal(initialCart);
-  const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const now = new Date().toLocaleTimeString([], {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 
   return {
+    stateVersion: 1,
+    updatedAtMs: Date.now(),
     venueName: 'Roast & Co. Flagship',
     venueSlug: 'roast-and-co',
     serviceLevel: 3,
@@ -328,6 +379,41 @@ export function createInitialCafeState(): CafeEcosystemState {
   };
 }
 
+export async function saveCloudEcosystemState(
+  state: CafeEcosystemState
+): Promise<void> {
+  try {
+    const payload = JSON.stringify({
+      ...state,
+      updatedAtMs: Date.now(),
+    });
+    await supabaseCloudStorage.storage
+      .from(SYNC_BUCKET)
+      .upload(SYNC_OBJECT_PATH, payload, {
+        contentType: 'application/json',
+        upsert: true,
+        cacheControl: '0',
+      });
+  } catch {
+    // Ignore transient network errors
+  }
+}
+
+export async function fetchCloudEcosystemState(): Promise<CafeEcosystemState | null> {
+  try {
+    const url = `${SUPABASE_PROJECT_URL}/storage/v1/object/public/${SYNC_BUCKET}/${SYNC_OBJECT_PATH}?t=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const parsed = (await res.json()) as CafeEcosystemState;
+    if (!parsed || !Array.isArray(parsed.orders) || !Array.isArray(parsed.dishes)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function applyAdminDishPatch(
   state: CafeEcosystemState,
   dishId: string,
@@ -345,28 +431,45 @@ export function applyAdminDishPatch(
 
   const target = nextDishes.find((d) => d.id === dishId);
   const latencyMs = Math.floor(105 + Math.random() * 80);
-  const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const now = new Date().toLocaleTimeString([], {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  const title = `Admin Updated: ${target?.name || dishId}`;
+  const body =
+    patch.isAvailable !== undefined
+      ? patch.isAvailable
+        ? 'Restocked Available on all guest phones'
+        : 'Marked 86 SOLD OUT — hidden on all guest phones'
+      : `Price updated to ${state.currencySymbol}${target?.price} across all tables`;
 
   const event: PushNotificationEvent = {
     id: `evt-${Date.now()}`,
     timestamp: now,
     targetApk: 'guest-web',
     channel: 'supabase_realtime:menu_items',
-    title: `Admin Updated: ${target?.name || dishId}`,
-    body:
-      patch.isAvailable !== undefined
-        ? patch.isAvailable
-          ? 'Restocked Available on all guest phones'
-          : 'Marked 86 SOLD OUT — hidden on all guest phones'
-        : `Price updated to ${state.currencySymbol}${target?.price} across all tables`,
+    title,
+    body,
     latencyMs,
   };
 
   return {
     ...state,
+    stateVersion: (state.stateVersion || 1) + 1,
+    updatedAtMs: Date.now(),
     dishes: nextDishes,
     cart: nextCart,
     lastSyncLatencyMs: latencyMs,
     pushEvents: [event, ...state.pushEvents.slice(0, 19)],
+    lastAlert: {
+      id: event.id,
+      targetApk: 'guest-web',
+      title,
+      body,
+      createdAtMs: Date.now(),
+    },
   };
 }

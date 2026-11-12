@@ -5,6 +5,9 @@
     "": {
       "name": "react-example",
       "dependencies": {
+        "@capacitor/core": "^6.0.0",
+        "@capacitor/haptics": "^6.0.0",
+        "@capacitor/local-notifications": "^6.0.0",
         "@google/genai": "^2.4.0",
         "@supabase/supabase-js": "^2.119.0",
         "@tailwindcss/vite": "^4.3.3",
@@ -36,6 +39,12 @@
     },
   },
   "packages": {
+    "@capacitor/core": ["@capacitor/core@6.2.3", "", { "dependencies": { "tslib": "^2.1.0" } }, "sha512-zajW/Fu1RFi42CC6KDjjgOIJ57hCl0Mo9FixpWpm6wXYAsFOU04dk+CBLvRt6rtO3sd6Lce4xxu68Pvi1oR99w=="],
+
+    "@capacitor/haptics": ["@capacitor/haptics@6.0.3", "", { "peerDependencies": { "@capacitor/core": "^6.0.0" } }, "sha512-6yKF0+lRUZEEx1GDFWgnKHia974np7o1OgmRl/btL9cSMZh0TSDZTyDMH/qcy4AM39CfuIeLs4N4h5lwixXLuQ=="],
+
+    "@capacitor/local-notifications": ["@capacitor/local-notifications@6.1.3", "", { "peerDependencies": { "@capacitor/core": "^6.0.0" } }, "sha512-AsVVPmuYoSzHX4kbLBwjdrV7q3KBagpJtngNyz6FFwNk9C5osyQATWxKWXwqJgMcMm0CqZ5yvpm+beHKBYsHYw=="],
+
     "@dimforge/rapier3d-compat": ["@dimforge/rapier3d-compat@0.12.0", "", {}, "sha512-uekIGetywIgopfD97oDL5PfeezkFpNhwlzlaEYNOA0N6ghdsOvh/HYjSMek5Q2O1PYvRSDFcqFVJl4r4ZBwOow=="],
 
     "@emnapi/core": ["@emnapi/core@2.0.0-beta.2", "", { "dependencies": { "@emnapi/wasi-threads": "2.2.0", "tslib": "^2.4.0" } }, "sha512-MzCVoWtcg4Pm2B3je5mMvYMvj3MmBKw+fU7vbsJc9/iT8ip6/eYIHo/Dsm/mr+wsHB6SEyJDuxB09Yy6r/8+4A=="],

@@ -29,10 +29,10 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install Root Dependencies & Capacitor Android
+      - name: Install Root Dependencies & Capacitor Android Plugins
         run: |
           npm install --legacy-peer-deps
-          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
+          npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 @capacitor/local-notifications@^6.0.0 @capacitor/haptics@^6.0.0
 
       - name: Build 1 - Waiter Phone APK (com.buildbros.waiter)
         run: |
@@ -43,14 +43,21 @@ jobs:
             "appId": "com.buildbros.waiter",
             "appName": "Build Bros Waiter",
             "webDir": "dist",
-            "bundledWebRuntime": false
+            "bundledWebRuntime": false,
+            "plugins": {
+              "LocalNotifications": {
+                "smallIcon": "ic_stat_icon_config_sample",
+                "iconColor": "#E8500C"
+              }
+            }
           }
           EOF
           rm -rf android
           npx cap add android
+          npx cap sync android
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' android/app/src/main/AndroidManifest.xml
           cd android && chmod +x gradlew && ./gradlew assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-waiter.apk
-          cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-waiter.apk
 
       - name: Build 2 - Kitchen & Reception KDS APK (com.buildbros.kitchen)
         run: |
@@ -60,14 +67,21 @@ jobs:
             "appId": "com.buildbros.kitchen",
             "appName": "Build Bros Kitchen KDS",
             "webDir": "dist",
-            "bundledWebRuntime": false
+            "bundledWebRuntime": false,
+            "plugins": {
+              "LocalNotifications": {
+                "smallIcon": "ic_stat_icon_config_sample",
+                "iconColor": "#E8500C"
+              }
+            }
           }
           EOF
           rm -rf android
           npx cap add android
+          npx cap sync android
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' android/app/src/main/AndroidManifest.xml
           cd android && chmod +x gradlew && ./gradlew assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-kitchen.apk
-          cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-kitchen.apk
 
       - name: Build 3 - Owner Admin Phone APK (com.buildbros.admin)
         run: |
@@ -77,14 +91,21 @@ jobs:
             "appId": "com.buildbros.admin",
             "appName": "Build Bros Owner Admin",
             "webDir": "dist",
-            "bundledWebRuntime": false
+            "bundledWebRuntime": false,
+            "plugins": {
+              "LocalNotifications": {
+                "smallIcon": "ic_stat_icon_config_sample",
+                "iconColor": "#E8500C"
+              }
+            }
           }
           EOF
           rm -rf android
           npx cap add android
+          npx cap sync android
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' android/app/src/main/AndroidManifest.xml
           cd android && chmod +x gradlew && ./gradlew assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-admin.apk
-          cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-admin.apk
           rm -rf android capacitor.config.json
 
       - name: Commit Compiled .apk Files Directly into /apks in Repo
@@ -92,7 +113,7 @@ jobs:
           git config user.name "varchasvaateeksh77-ui"
           git config user.email "varchasvaateeksh77@gmail.com"
           git add -f apks/buildbros-waiter.apk apks/buildbros-kitchen.apk apks/buildbros-admin.apk
-          git commit -m "chore(apk): add compiled Android .apk files to /apks [skip ci]" || true
+          git commit -m "chore(apk): update compiled Android .apk files with live cloud sync & native notifications [skip ci]" || true
           git push origin HEAD:main || true
 
       - name: Upload 3 Android APKs as Workflow Artifacts
@@ -114,7 +135,7 @@ jobs:
             apks/buildbros-kitchen.apk \
             apks/buildbros-admin.apk \
             --title "The Cafe Ecosystem — Direct Android Phone APKs (v1.0.0)" \
-            --notes "Direct installable Android APKs for staff phones:
+            --notes "Direct installable Android APKs with live cross-phone Supabase cloud sync and native Android status-bar notifications:
             - **Waiter Phone APK** (\`buildbros-waiter.apk\` · \`com.buildbros.waiter\`)
             - **Kitchen & Reception KDS APK** (\`buildbros-kitchen.apk\` · \`com.buildbros.kitchen\`)
             - **Owner / Admin Phone APK** (\`buildbros-admin.apk\` · \`com.buildbros.admin\`)" \

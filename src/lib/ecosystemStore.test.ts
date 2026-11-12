@@ -5,6 +5,8 @@ import {
   calculateCartTotal,
   createInitialCafeState,
   applyAdminDishPatch,
+  saveCloudEcosystemState,
+  fetchCloudEcosystemState,
   SUPABASE_PROJECT_URL,
   SUPABASE_PUBLISHABLE_KEY,
   FCM_VAPID_PUBLIC_KEY,
@@ -45,4 +47,12 @@ test('buildTableQrUrl and QRCode generate direct working table URLs and valid sc
   const svg = await QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'H' });
   assert.ok(svg.includes('<svg'));
   assert.ok(svg.includes('<path'));
+});
+
+test('saveCloudEcosystemState and fetchCloudEcosystemState sync Kitchen Ready tickets across separate APK instances', async () => {
+  const initial = createInitialCafeState();
+  await saveCloudEcosystemState(initial);
+  const fetched = await fetchCloudEcosystemState();
+  assert.ok(fetched);
+  assert.equal(fetched.orders.length, 2);
 });
