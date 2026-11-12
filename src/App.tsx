@@ -26,12 +26,44 @@ type ActiveWorkspaceView =
   | 'theme-catalogue'
   | 'live-theme';
 
+const GITHUB_REPO_URL = 'https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem';
+const GITHUB_RELEASES_URL = 'https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/releases/latest';
+const GITHUB_ACTIONS_URL = 'https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/actions';
+
+function getInitialViewFromUrl(): ActiveWorkspaceView {
+  const envApk = (import.meta as unknown as { env?: Record<string, string> })?.env
+    ?.VITE_DEFAULT_APK;
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const apk = params.get('apk') || envApk;
+    if (apk === 'waiter') return 'waiter-apk';
+    if (apk === 'kitchen') return 'kitchen-apk';
+    if (apk === 'admin') return 'admin-apk';
+    if (apk === 'guest') return 'guest-web';
+  }
+  return 'split-suite';
+}
+
 export default function App() {
   const [state, setState] = useState<CafeEcosystemState>(() => createInitialCafeState());
-  const [view, setView] = useState<ActiveWorkspaceView>('split-suite');
+  const [view, setView] = useState<ActiveWorkspaceView>(() => getInitialViewFromUrl());
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [guestStep, setGuestStep] = useState<'deck' | 'cart'>('deck');
+  const [guestDisplayMode, setGuestDisplayMode] = useState<'swipe' | 'list'>('swipe');
+
+  // Swipe Deck State for Surface 1 (Guest Web Menu)
+  const [deckIndex, setDeckIndex] = useState<number>(0);
+  const [skippedIds, setSkippedIds] = useState<string[]>([]);
+  const [swipeHistory, setSwipeHistory] = useState<Array<{ index: number; action: 'skip' | 'add'; dishId: string }>>([]);
+  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const [exitDirection, setExitDirection] = useState<'left' | 'right' | null>(null);
+  const [lastSwipeFeedback, setLastSwipeFeedback] = useState<{ type: 'skip' | 'add'; dishName: string } | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+
   const [waiterTab, setWaiterTab] = useState<'calls' | 'pickup' | 'floor'>('calls');
   const [adminTab, setAdminTab] = useState<'menu' | 'floor' | 'qr' | 'apk-build'>('menu');
+  const [showApkModal, setShowApkModal] = useState<boolean>(false);
   const [editingDishId, setEditingDishId] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState<string>('');
   const [copiedSql, setCopiedSql] = useState(false);
@@ -106,6 +138,27 @@ export default function App() {
     }));
   };
 
+  // Available dishes in selected sub-section
+  const categories = ['All', ...Array.from(new Set(state.dishes.map((d) => d.category)))];
+  const filteredDishes = (
+    selectedCategory === 'All'
+      ? state.dishes
+      : state.dishes.filter((d) => d.category === selectedCategory)
+  ).filter((d) => d.isAvailable);
+
+  const currentDeckDish: DishItem | undefined = filteredDishes[deckIndex];
+  const nextDeckDish: DishItem | undefined = filteredDishes[deckIndex + 1];
+
+  const handleSelectSubSection = (cat: string) => {
+    soundFX.play('tap');
+    setSelectedCategory(cat);
+    setDeckIndex(0);
+    setSwipeHistory([]);
+    setDragOffset({ x: 0, y: 0 });
+    setExitDirection(null);
+    setGuestStep('deck');
+  };
+
   // Guest Web Menu Handlers
   const handleAddToCart = (dish: DishItem) => {
     if (!dish.isAvailable) return;
@@ -129,10 +182,88 @@ export default function App() {
     }));
   };
 
+  // Swipe Deck Actions: Swipe Left = Skip, Swipe Right = Add to Cart
+  const triggerSwipeAction = (direction: 'left' | 'right') => {
+    if (!currentDeckDish || exitDirection) return;
+    const dish = currentDeckDish;
+    setExitDirection(direction);
+
+    if (direction === 'right') {
+      if (state.serviceLevel >= 2) {
+        handleAddToCart(dish);
+      } else {
+        soundFX.play('tap');
+      }
+      setLastSwipeFeedback({ type: 'add', dishName: dish.name });
+    } else {
+      soundFX.play('tap');
+      setSkippedIds((prev) => (prev.includes(dish.id) ? prev : [...prev, dish.id]));
+      setLastSwipeFeedback({ type: 'skip', dishName: dish.name });
+    }
+
+    setSwipeHistory((prev) => [
+      ...prev,
+      { index: deckIndex, action: direction === 'right' ? 'add' : 'skip', dishId: dish.id },
+    ]);
+
+    window.setTimeout(() => {
+      setDeckIndex((prev) => prev + 1);
+      setExitDirection(null);
+      setDragOffset({ x: 0, y: 0 });
+    }, 180);
+  };
+
+  const handleUndoSwipe = () => {
+    if (swipeHistory.length === 0) return;
+    soundFX.play('tap');
+    const last = swipeHistory[swipeHistory.length - 1];
+    setSwipeHistory((prev) => prev.slice(0, -1));
+    if (last.action === 'skip') {
+      setSkippedIds((prev) => prev.filter((id) => id !== last.dishId));
+    }
+    setDeckIndex(last.index);
+    setExitDirection(null);
+    setDragOffset({ x: 0, y: 0 });
+    setLastSwipeFeedback(null);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (exitDirection) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    setIsDragging(true);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging || !dragStartRef.current) return;
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = (e.clientY - dragStartRef.current.y) * 0.25;
+    setDragOffset({ x: dx, y: dy });
+  };
+
+  const handlePointerUp = () => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    dragStartRef.current = null;
+    const SWIPE_THRESHOLD = 75;
+    if (dragOffset.x > SWIPE_THRESHOLD) {
+      triggerSwipeAction('right');
+    } else if (dragOffset.x < -SWIPE_THRESHOLD) {
+      triggerSwipeAction('left');
+    } else {
+      setDragOffset({ x: 0, y: 0 });
+    }
+  };
+
   const handleGuestCallWaiter = () => {
     soundFX.play('waiterCall');
     const total = calculateCartTotal(state.cart);
-    const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const now = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
     setState((prev) => ({
       ...prev,
       waiterCalls: [
@@ -165,7 +296,12 @@ export default function App() {
     soundFX.play('ticketSent');
     const ticketNumber = `#0${Math.floor(413 + Math.random() * 85)}`;
     const totalAmount = calculateCartTotal(state.cart);
-    const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const now = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
 
     setState((prev) => ({
       ...prev,
@@ -351,6 +487,9 @@ export default function App() {
   const handleSwitchLevel = (level: ServiceLevel) => {
     soundFX.play('tap');
     setState((prev) => ({ ...prev, serviceLevel: level }));
+    if (level === 1) {
+      setGuestStep('deck');
+    }
     pushLog(
       'guest-web',
       'supabase_realtime:venues',
@@ -358,8 +497,8 @@ export default function App() {
       level === 1
         ? 'All tables switched to Digital Menu browse mode'
         : level === 2
-        ? 'All tables enabled Cart + 1-tap Waiter Call'
-        : 'All tables enabled Full Mobile Ordering to Kitchen KDS'
+        ? 'All tables enabled Swipe Deck Cart + Call the Waiter'
+        : 'All tables enabled Swipe Deck Cart + Send the Order to Kitchen KDS'
     );
   };
 
@@ -401,18 +540,20 @@ export default function App() {
     );
   }
 
-  const categories = ['All', ...Array.from(new Set(state.dishes.map((d) => d.category)))];
-  const filteredDishes =
-    selectedCategory === 'All'
-      ? state.dishes
-      : state.dishes.filter((d) => d.category === selectedCategory);
   const cartTotal = calculateCartTotal(state.cart);
   const cartCount = state.cart.reduce((sum, c) => sum + c.qty, 0);
   const activeTableCall = state.waiterCalls.find((c) => c.tableNumber === state.activeTable);
-  const activeTableOrder = state.orders.find((o) => o.tableNumber === state.activeTable) || state.orders[0];
+  const activeTableOrder =
+    state.orders.find((o) => o.tableNumber === state.activeTable) || state.orders[0];
   const readyOrders = state.orders.filter((o) => o.status === 'ready');
   const pendingCalls = state.waiterCalls.filter((c) => c.status === 'pending');
   const shiftRevenue = state.tables.reduce((acc, t) => acc + (t.cartTotal || 0), 0);
+
+  const effectiveX =
+    exitDirection === 'right' ? 320 : exitDirection === 'left' ? -320 : dragOffset.x;
+  const effectiveRotate = effectiveX * 0.045;
+  const showAddStamp = effectiveX > 35;
+  const showSkipStamp = effectiveX < -35;
 
   return (
     <div className="min-h-screen bg-[#F7F2ED] text-[#1A0C06] flex flex-col">
@@ -439,7 +580,7 @@ export default function App() {
             {(
               [
                 { id: 'split-suite', label: 'All 4 Surfaces' },
-                { id: 'guest-web', label: '1. Guest Web Menu' },
+                { id: 'guest-web', label: '1. Guest Swipe Menu' },
                 { id: 'waiter-apk', label: '2. Waiter APK' },
                 { id: 'kitchen-apk', label: '3. Kitchen KDS APK' },
                 { id: 'admin-apk', label: '4. Owner Admin APK' },
@@ -460,18 +601,155 @@ export default function App() {
             ))}
           </nav>
 
-          {/* Zone 3: Primary Action */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Zone 3: Primary Actions (Install APKs + 4-Theme Catalogue) */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              data-testid="open-apk-installer-btn"
+              onClick={() => setShowApkModal(true)}
+              className="px-3 py-1.5 rounded-[10px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] text-[12px] font-mono-code font-bold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              ↓ Install Phone APKs
+            </button>
             <button
               type="button"
               onClick={() => setView('theme-catalogue')}
               className="px-3.5 py-1.5 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              Open 4-Theme Catalogue
+              4-Theme Catalogue
             </button>
           </div>
         </div>
       </header>
+
+      {/* Direct Phone APK Download & Installation Modal */}
+      {showApkModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Direct Android Phone APKs for Waiter, Kitchen, and Owner"
+          className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div className="bg-[#140905] text-[#FBEFE6] border-2 border-[#C4F042] rounded-[24px] max-w-[820px] w-full p-6 flex flex-col gap-5">
+            <div className="flex items-start justify-between gap-4 border-b border-[#FBEFE6]/15 pb-4">
+              <div>
+                <span className="font-mono-code text-[11px] font-bold uppercase text-[#C4F042] tracking-wider block">
+                  DIRECT ANDROID PHONE INSTALLERS · 3 STAFF APKs
+                </span>
+                <h2 className="text-[22px] font-bold mt-1">
+                  Install Waiter, Kitchen &amp; Owner APKs on Staff Phones
+                </h2>
+                <p className="text-[13px] text-[#FBEFE6]/75 mt-1">
+                  Every push to <span className="font-mono-code text-[#C4F042]">varchasvaateeksh77-ui/the-cafe-ecosystem</span> compiles native signed Android <span className="font-mono-code">.apk</span> packages via GitHub Actions, or you can launch each phone surface directly in full-screen Android mode right now.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowApkModal(false)}
+                className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer shrink-0"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {[
+                {
+                  title: '1. Waiter Phone APK',
+                  pkg: 'com.buildbros.waiter',
+                  apkFile: 'buildbros-waiter.apk',
+                  role: 'Urgent Table Calls, Cart Snapshot & Kitchen Pass Pickup Alerts',
+                  viewId: 'waiter-apk' as ActiveWorkspaceView,
+                  query: '?apk=waiter',
+                  badge: 'FCM Wake-Lock + Vibration',
+                },
+                {
+                  title: '2. Kitchen & Reception APK',
+                  pkg: 'com.buildbros.kitchen',
+                  apkFile: 'buildbros-kitchen.apk',
+                  role: 'Reception Gate Confirmation + 4-Stage KDS (New → Cooking → Ready → Served)',
+                  viewId: 'kitchen-apk' as ActiveWorkspaceView,
+                  query: '?apk=kitchen',
+                  badge: 'Keep-Screen-Awake KDS',
+                },
+                {
+                  title: '3. Owner / Admin Phone APK',
+                  pkg: 'com.buildbros.admin',
+                  apkFile: 'buildbros-admin.apk',
+                  role: 'Instant Price Edits, 86 Sold-Out Toggles, Service Level 1/2/3 & 12-Table Floor',
+                  viewId: 'admin-apk' as ActiveWorkspaceView,
+                  query: '?apk=admin',
+                  badge: '<300ms Menu Broadcast',
+                },
+              ].map((item) => (
+                <div
+                  key={item.pkg}
+                  className="p-4 rounded-[16px] bg-[#1A0C06] border border-[#FBEFE6]/15 flex flex-col justify-between gap-3"
+                >
+                  <div className="space-y-2">
+                    <span className="px-2 py-0.5 rounded-[6px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[10px] font-bold inline-block">
+                      {item.badge}
+                    </span>
+                    <h3 className="text-[16px] font-bold text-[#FBEFE6]">{item.title}</h3>
+                    <div className="font-mono-code text-[11px] text-[#FF8741]">{item.pkg}</div>
+                    <p className="text-[12px] text-[#FBEFE6]/75 leading-relaxed">{item.role}</p>
+                  </div>
+
+                  <div className="flex flex-col gap-2 pt-2 border-t border-[#FBEFE6]/10">
+                    <a
+                      href={`${GITHUB_RELEASES_URL}/download/${item.apkFile}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full py-2 px-3 rounded-[8px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] font-mono-code text-[11px] font-bold text-center no-underline"
+                    >
+                      ↓ Download {item.apkFile}
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setView(item.viewId);
+                        setShowApkModal(false);
+                      }}
+                      className="w-full py-2 px-3 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[11px] font-semibold cursor-pointer"
+                    >
+                      Launch Full-Screen Phone Mode →
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-4 rounded-[14px] bg-[#1A0C06] border border-[#FBEFE6]/10 flex flex-wrap items-center justify-between gap-3 text-[12px]">
+              <div className="space-y-0.5">
+                <div className="font-mono-code font-bold text-[#C4F042]">
+                  GitHub Repository &amp; Automated Cloud APK Builder
+                </div>
+                <div className="text-[#FBEFE6]/75">
+                  Source code, Capacitor 6 Android projects, and GitHub Actions APK artifacts live in your new repo.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={GITHUB_ACTIONS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#3A2214] text-[#C4F042] font-mono-code text-[11px] font-semibold no-underline"
+                >
+                  View APK Build Actions →
+                </a>
+                <a
+                  href={GITHUB_REPO_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1.5 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-semibold no-underline"
+                >
+                  Open GitHub Repo →
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Workspace Sub-Toolbar: Live Supabase + FCM Telemetry & Level Controls */}
       <div className="bg-[#1A0C06] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-2.5">
@@ -512,11 +790,16 @@ export default function App() {
               ))}
             </div>
 
-            <div className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]" role="group" aria-label="Venue Service Level">
+            <div
+              className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
+              role="group"
+              aria-label="Venue Service Level"
+            >
               {([1, 2, 3] as ServiceLevel[]).map((lvl) => (
                 <button
                   key={lvl}
                   type="button"
+                  data-testid={`switch-level-${lvl}-btn`}
                   onClick={() => handleSwitchLevel(lvl)}
                   className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
                     state.serviceLevel === lvl
@@ -553,7 +836,7 @@ export default function App() {
             <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2.5">
                 <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-bold">
-                  SURFACE 4 · ADMIN APK
+                  SURFACE 4 · OWNER ADMIN APK
                 </span>
                 <h2 className="text-[15px] font-semibold m-0">
                   com.buildbros.admin · Live Price, 86 Sold-Out &amp; Floor Controller
@@ -576,7 +859,7 @@ export default function App() {
                     { id: 'menu', label: 'Instant Menu & 86 Editor' },
                     { id: 'floor', label: 'Live 12-Table Floor Monitor' },
                     { id: 'qr', label: 'Table QR Plaque Generator' },
-                    { id: 'apk-build', label: 'Android APK & Supabase SQL' },
+                    { id: 'apk-build', label: 'Direct Phone APKs & Supabase SQL' },
                   ] as const
                 ).map((t) => (
                   <button
@@ -627,8 +910,13 @@ export default function App() {
                         }`}
                       >
                         <div className="min-w-0">
-                          <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
-                            {dish.name}
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono-code text-[10px] px-1.5 py-0.5 rounded bg-[#E3D9D3]/70 text-[#1A0C06]">
+                              {dish.category}
+                            </span>
+                            <span className="font-semibold text-[13px] text-[#1A0C06] truncate">
+                              {dish.name}
+                            </span>
                           </div>
                           <div className="flex items-center gap-2 mt-1">
                             {isEditing ? (
@@ -745,30 +1033,65 @@ export default function App() {
               )}
 
               {adminTab === 'apk-build' && (
-                <div className="p-4 rounded-[16px] bg-[#140905] text-[#FBEFE6] font-mono-code text-[12px] flex flex-col gap-2">
+                <div className="p-4 rounded-[16px] bg-[#140905] text-[#FBEFE6] font-mono-code text-[12px] flex flex-col gap-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[#C4F042] font-bold">
-                      Capacitor 6 Android APK Monorepo + Supabase SQL Schema
+                      Direct Installable Android APKs (Waiter · Kitchen · Owner) + Supabase SQL
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard?.writeText(
-                          `-- Run in Supabase SQL Editor (${SUPABASE_PROJECT_URL})\n-- Full migration in /supabase/migrations/0001_init_cafe_ecosystem.sql`
-                        );
-                        setCopiedSql(true);
-                        setTimeout(() => setCopiedSql(false), 2000);
-                      }}
-                      className="px-3 py-1 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] text-[11px] font-semibold cursor-pointer"
-                    >
-                      {copiedSql ? 'Copied SQL Info' : 'Copy SQL Reference'}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowApkModal(true)}
+                        className="px-3 py-1 rounded-[6px] bg-[#C4F042] text-[#140905] text-[11px] font-bold cursor-pointer"
+                      >
+                        ↓ Open Phone APK Installer
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(
+                            `-- Run in Supabase SQL Editor (${SUPABASE_PROJECT_URL})\n-- Full migration in /supabase/migrations/0001_init_cafe_ecosystem.sql`
+                          );
+                          setCopiedSql(true);
+                          setTimeout(() => setCopiedSql(false), 2000);
+                        }}
+                        className="px-3 py-1 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] text-[11px] font-semibold cursor-pointer"
+                      >
+                        {copiedSql ? 'Copied SQL Info' : 'Copy SQL Reference'}
+                      </button>
+                    </div>
                   </div>
-                  <div className="text-[11px] text-[#FBEFE6]/80">
-                    APKs: android-apks/waiter-apk (com.buildbros.waiter) · android-apks/kitchen-apk (com.buildbros.kitchen) · android-apks/admin-apk (com.buildbros.admin)
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                    <a
+                      href={`${GITHUB_RELEASES_URL}/download/buildbros-waiter.apk`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2.5 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] no-underline flex items-center justify-between"
+                    >
+                      <span>1. buildbros-waiter.apk</span>
+                      <span className="text-[#C4F042] font-bold">↓ APK</span>
+                    </a>
+                    <a
+                      href={`${GITHUB_RELEASES_URL}/download/buildbros-kitchen.apk`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2.5 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] no-underline flex items-center justify-between"
+                    >
+                      <span>2. buildbros-kitchen.apk</span>
+                      <span className="text-[#C4F042] font-bold">↓ APK</span>
+                    </a>
+                    <a
+                      href={`${GITHUB_RELEASES_URL}/download/buildbros-admin.apk`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2.5 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] no-underline flex items-center justify-between"
+                    >
+                      <span>3. buildbros-admin.apk</span>
+                      <span className="text-[#C4F042] font-bold">↓ APK</span>
+                    </a>
                   </div>
                   <div className="text-[11px] text-[#FBEFE6]/70 break-all">
-                    Supabase Publishable Key: {SUPABASE_PUBLISHABLE_KEY} · FCM VAPID Key: {FCM_VAPID_PUBLIC_KEY.slice(0, 36)}...
+                    Repo: {GITHUB_REPO_URL} · Supabase Key: {SUPABASE_PUBLISHABLE_KEY} · FCM VAPID: {FCM_VAPID_PUBLIC_KEY.slice(0, 32)}...
                   </div>
                 </div>
               )}
@@ -776,132 +1099,213 @@ export default function App() {
           </section>
         )}
 
-        {/* 3 Operational Surfaces Grid: Guest Web Menu + Waiter APK + Kitchen & Reception KDS APK */}
+        {/* 3 Operational Surfaces Grid: Guest Swipe Deck Menu + Waiter APK + Kitchen & Reception KDS APK */}
         <div
           className={`grid gap-6 items-start ${
             view === 'split-suite'
               ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
-              : 'grid-cols-1 max-w-[540px] mx-auto w-full'
+              : 'grid-cols-1 max-w-[560px] mx-auto w-full'
           }`}
         >
-          {/* Surface 1: Guest Web Menu (Zero-App Table QR Browser Experience) */}
+          {/* =====================================================================
+              SURFACE 1: GUEST WEB MENU (SWIPE DECK + SUB-SECTIONS + CART VIEW)
+              Swipe Left = Skipped · Swipe Right = In Cart · Done Picking = Click Cart
+              Level 2 in Cart = Call the Waiter · Level 3 in Cart = Send the Order
+             ===================================================================== */}
           {(view === 'split-suite' || view === 'guest-web') && (
             <section
               aria-label="Guest Web Menu"
-              className="bg-[#FFFFFF] rounded-[24px] border-2 border-[#E3D9D3] overflow-hidden flex flex-col"
+              className="bg-[#FFFFFF] rounded-[24px] border-2 border-[#1A0C06] overflow-hidden flex flex-col"
               data-testid="surface-guest-web"
             >
-              <div className="bg-[#F7F2ED] px-4 py-3 border-b border-[#E3D9D3] flex items-center justify-between">
+              {/* Top Venue Header + Cart Button */}
+              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3 border-b border-[#2A180D] flex items-center justify-between gap-2">
                 <div>
-                  <span className="font-mono-code text-[10px] font-bold uppercase text-[#C03E0A] block">
-                    SURFACE 1 · GUEST WEB MENU
+                  <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
+                    SURFACE 1 · GUEST SWIPE DECK MENU · DEMO
                   </span>
-                  <h3 className="text-[15px] font-bold text-[#1A0C06] m-0">
+                  <h3 className="text-[15px] font-bold text-[#FBEFE6] m-0">
                     {state.venueName} · Table {state.activeTable}
                   </h3>
                 </div>
-                <span className="px-2.5 py-1 rounded-[8px] bg-[#1A0C06] text-[#FBEFE6] font-mono-code text-[11px] font-semibold">
-                  Level {state.serviceLevel}
-                </span>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="px-2 py-1 rounded-[8px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[11px] font-semibold">
+                    L{state.serviceLevel}
+                  </span>
+                  {state.serviceLevel >= 2 && (
+                    <button
+                      type="button"
+                      data-testid="header-cart-btn"
+                      onClick={() => {
+                        soundFX.play('tap');
+                        setGuestStep((prev) => (prev === 'cart' ? 'deck' : 'cart'));
+                      }}
+                      className="px-3 py-1 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer tabular-nums"
+                    >
+                      {guestStep === 'cart'
+                        ? '← Deck'
+                        : `Cart (${cartCount}) · ${state.currencySymbol}${cartTotal}`}
+                    </button>
+                  )}
+                </div>
               </div>
 
-              {/* Category Tabs */}
-              <div className="px-3.5 py-2 flex items-center gap-1.5 overflow-x-auto border-b border-[#E3D9D3]">
-                {categories.map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setSelectedCategory(cat)}
-                    className={`px-2.5 py-1 rounded-[8px] text-[12px] font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
-                      selectedCategory === cat
-                        ? 'bg-[#1A0C06] text-[#FBEFE6]'
-                        : 'bg-[#F3ECE5] text-[#6C625C] hover:text-[#1A0C06]'
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
+              {guestStep === 'cart' && state.serviceLevel >= 2 ? (
+                /* ===============================================================
+                   GUEST CART VIEW (Opened when Done Picking -> Click the Cart)
+                   Level 2 = "Call the Waiter" button
+                   Level 3 = "Send the Order" button
+                   =============================================================== */
+                <div className="p-4 flex flex-col gap-3.5" data-testid="guest-cart-view">
+                  <div className="flex items-center justify-between border-b border-[#E3D9D3] pb-2.5">
+                    <div>
+                      <span className="font-mono-code text-[10px] font-bold uppercase text-[#C03E0A] block">
+                        DONE PICKING · TABLE {state.activeTable} CART
+                      </span>
+                      <h4 className="text-[16px] font-bold text-[#1A0C06] m-0">
+                        Your Picked Dishes ({cartCount})
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="guest-back-to-deck-btn"
+                      onClick={() => setGuestStep('deck')}
+                      className="px-2.5 py-1 rounded-[8px] bg-[#F3ECE5] hover:bg-[#E3D9D3] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer"
+                    >
+                      ← Back to Swipe Deck
+                    </button>
+                  </div>
 
-              {/* Dish List */}
-              <div className="p-3.5 flex flex-col gap-2.5 max-h-[340px] overflow-y-auto">
-                {filteredDishes.map((dish) => {
-                  const inCart = state.cart.find((c) => c.dish.id === dish.id);
-                  return (
+                  {/* Live Level 2 Waiter Standby Status inside Cart */}
+                  {activeTableCall && (
                     <div
-                      key={dish.id}
-                      className={`p-3 rounded-[14px] border border-[#E3D9D3] bg-[#F7F2ED]/60 flex items-center justify-between gap-3 ${
-                        !dish.isAvailable ? 'opacity-50' : ''
+                      role="status"
+                      aria-live="polite"
+                      data-testid="guest-cart-waiter-status"
+                      className={`p-3 rounded-[12px] border-2 flex flex-col gap-1 ${
+                        activeTableCall.status === 'acknowledged'
+                          ? 'bg-[#140905] text-[#C4F042] border-[#C4F042]'
+                          : 'bg-[#FFEEE3] text-[#1A0C06] border-[#E8500C]'
                       }`}
                     >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <svg width="34" height="34" viewBox="0 0 34 34" fill="none" aria-hidden="true" className="shrink-0">
-                          <circle cx="17" cy="17" r="15" fill="#F3ECE5" stroke="#E3D9D3" strokeWidth="1.5" />
-                          <circle cx="17" cy="17" r="9" fill={dish.plateColor} />
-                        </svg>
-                        <div className="min-w-0">
-                          <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
-                            {dish.name}
-                          </div>
-                          <div className="text-[11px] text-[#6C625C] truncate">
-                            {dish.description}
-                          </div>
-                          <div className="font-mono-code text-[12px] font-bold text-[#1A0C06] mt-0.5 tabular-nums">
-                            {dish.isAvailable
-                              ? `${state.currencySymbol}${dish.price}`
-                              : '86 · Sold Out'}
-                          </div>
-                        </div>
+                      <div className="flex items-center justify-between font-mono-code text-[11px] font-bold uppercase">
+                        <span>
+                          {activeTableCall.status === 'acknowledged'
+                            ? '✓ WAITER ON MY WAY TO TABLE ' + state.activeTable
+                            : '● WAITER NOTIFIED · STANDBY AT TABLE ' + state.activeTable}
+                        </span>
+                        <span>{activeTableCall.createdAt}</span>
                       </div>
-
-                      {state.serviceLevel >= 2 && dish.isAvailable && (
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {inCart && inCart.qty > 0 && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveFromCart(dish.id)}
-                                aria-label={`Remove one ${dish.name}`}
-                                className="w-7 h-7 rounded-[8px] bg-[#F3ECE5] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
-                              >
-                                -
-                              </button>
-                              <span className="font-mono-code text-[12px] font-bold w-4 text-center tabular-nums">
-                                {inCart.qty}
-                              </span>
-                            </>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => handleAddToCart(dish)}
-                            aria-label={`Add ${dish.name} to cart`}
-                            className="px-2.5 h-7 rounded-[8px] bg-[#1A0C06] hover:bg-[#E8500C] text-[#FBEFE6] font-semibold text-[12px] cursor-pointer transition-colors"
-                          >
-                            +
-                          </button>
-                        </div>
-                      )}
+                      <p className="text-[12px] opacity-90 m-0">
+                        {activeTableCall.status === 'acknowledged'
+                          ? 'Staff #04 acknowledged your call on the Waiter APK and is walking to your table now.'
+                          : 'Your cart snapshot and Table number were pushed to the Waiter APK.'}
+                      </p>
                     </div>
-                  );
-                })}
-              </div>
+                  )}
 
-              {/* Guest Footer Cart & Order Tracker */}
-              <div className="p-4 bg-[#F7F2ED] border-t border-[#E3D9D3] flex flex-col gap-2.5">
-                {state.serviceLevel === 1 && (
-                  <div className="flex items-center justify-between text-[12px] text-[#6C625C]">
-                    <span>Level 1 · Live Digital Menu</span>
-                    <span className="font-mono-code">Synced in &lt;300ms</span>
-                  </div>
-                )}
+                  {/* Live Level 3 Order Status Tracker inside Cart */}
+                  {state.serviceLevel === 3 && activeTableOrder && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      data-testid="guest-cart-order-status"
+                      className="p-3 rounded-[12px] bg-[#F7F2ED] border border-[#E8500C] flex flex-col gap-2"
+                    >
+                      <div className="flex items-center justify-between text-[12px]">
+                        <span className="font-mono-code font-bold text-[#1A0C06]">
+                          Live Ticket {activeTableOrder.ticketNumber} · Table {state.activeTable}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold uppercase">
+                          {activeTableOrder.status}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1">
+                        {(['new', 'cooking', 'ready', 'served'] as const).map((st) => (
+                          <div
+                            key={st}
+                            className={`text-center py-1 rounded text-[9px] font-mono-code font-bold uppercase ${
+                              activeTableOrder.status === st
+                                ? 'bg-[#1A0C06] text-[#C4F042]'
+                                : 'bg-[#E3D9D3]/60 text-[#6C625C]'
+                            }`}
+                          >
+                            {st}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
-                {state.serviceLevel >= 2 && (
-                  <>
-                    <div className="flex items-center justify-between text-[13px]">
-                      <span className="font-semibold">
-                        Table {state.activeTable} Cart ({cartCount} items)
+                  {/* Cart Items List */}
+                  {state.cart.length === 0 ? (
+                    <div className="py-8 text-center flex flex-col items-center gap-2">
+                      <p className="text-[13px] text-[#6C625C] m-0">
+                        Your cart is empty. Swipe right on dish cards to add them!
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setGuestStep('deck')}
+                        className="px-4 py-2 rounded-[10px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer mt-1"
+                      >
+                        Open Swipe Deck →
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2 max-h-[260px] overflow-y-auto pr-1">
+                      {state.cart.map(({ dish, qty }) => (
+                        <div
+                          key={dish.id}
+                          className="p-2.5 rounded-[12px] bg-[#F7F2ED] border border-[#E3D9D3] flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
+                              {dish.name}
+                            </div>
+                            <div className="font-mono-code text-[11px] text-[#6C625C] tabular-nums">
+                              {state.currencySymbol}
+                              {dish.price} × {qty} ={' '}
+                              <strong className="text-[#1A0C06]">
+                                {state.currencySymbol}
+                                {dish.price * qty}
+                              </strong>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveFromCart(dish.id)}
+                              aria-label={`Remove one ${dish.name}`}
+                              className="w-7 h-7 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
+                            >
+                              −
+                            </button>
+                            <span className="font-mono-code text-[12px] font-bold w-5 text-center tabular-nums">
+                              {qty}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleAddToCart(dish)}
+                              aria-label={`Add one ${dish.name}`}
+                              className="w-7 h-7 rounded-[8px] bg-[#1A0C06] text-[#FBEFE6] font-bold text-[14px] cursor-pointer"
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Cart Total & Level 2 ("Call the Waiter") / Level 3 ("Send the Order") Action Buttons */}
+                  <div className="pt-3 border-t border-[#E3D9D3] flex flex-col gap-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[13px] font-semibold text-[#6C625C]">
+                        Table {state.activeTable} Total ({cartCount} items)
                       </span>
-                      <span className="font-mono-code font-bold text-[15px] tabular-nums">
+                      <span className="font-mono-code text-[18px] font-bold text-[#1A0C06] tabular-nums">
                         {state.currencySymbol}
                         {cartTotal}
                       </span>
@@ -910,44 +1314,405 @@ export default function App() {
                     {state.serviceLevel === 2 && (
                       <button
                         type="button"
+                        data-testid="guest-call-waiter-btn"
                         onClick={handleGuestCallWaiter}
                         disabled={cartCount === 0}
-                        className="w-full h-10 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-semibold text-[13px] cursor-pointer transition-colors"
+                        className="w-full h-11 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer transition-colors"
                       >
                         {activeTableCall?.status === 'acknowledged'
-                          ? `Waiter on the way to Table ${state.activeTable}`
+                          ? `✓ Waiter On My Way to Table ${state.activeTable}`
                           : activeTableCall?.status === 'pending'
-                          ? `Waiter notified · Table ${state.activeTable}`
-                          : `Call waiter to Table ${state.activeTable}`}
+                          ? `Waiter Called · Call the Waiter Again`
+                          : `Call the Waiter (Table ${state.activeTable} · ${state.currencySymbol}${cartTotal})`}
                       </button>
                     )}
 
                     {state.serviceLevel === 3 && (
-                      <div className="flex flex-col gap-2">
-                        {activeTableOrder && (
-                          <div className="px-3 py-2 rounded-[10px] bg-[#FFEEE3] border border-[#E8500C]/30 flex items-center justify-between text-[12px]">
-                            <span className="font-mono-code font-bold">
-                              Ticket {activeTableOrder.ticketNumber}
-                            </span>
-                            <span className="font-semibold text-[#C03E0A] uppercase font-mono-code">
-                              {activeTableOrder.status}
-                            </span>
-                          </div>
-                        )}
+                      <button
+                        type="button"
+                        data-testid="guest-send-order-btn"
+                        onClick={handleGuestPlaceOrder}
+                        disabled={cartCount === 0}
+                        className="w-full h-11 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer transition-colors"
+                      >
+                        Send the Order (Table {state.activeTable} · {state.currencySymbol}
+                        {cartTotal}) →
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* ===============================================================
+                   GUEST MENU SWIPE DECK WITH SUB-SECTIONS
+                   =============================================================== */
+                <>
+                  {/* Sub-Section Category Pills + Swipe/List Mode Toggle */}
+                  <div className="px-3.5 py-2.5 bg-[#F7F2ED] border-b border-[#E3D9D3] flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono-code text-[10px] font-bold uppercase text-[#6C625C]">
+                        SUB-SECTIONS ({filteredDishes.length} DISHES)
+                      </span>
+                      <div className="flex items-center gap-1 bg-[#E3D9D3]/70 p-0.5 rounded-[7px]">
                         <button
                           type="button"
-                          onClick={handleGuestPlaceOrder}
-                          disabled={cartCount === 0}
-                          className="w-full h-10 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-semibold text-[13px] cursor-pointer transition-colors"
+                          onClick={() => setGuestDisplayMode('swipe')}
+                          className={`px-2 py-0.5 rounded-[5px] font-mono-code text-[10px] font-bold cursor-pointer ${
+                            guestDisplayMode === 'swipe'
+                              ? 'bg-[#1A0C06] text-[#FBEFE6]'
+                              : 'text-[#6C625C]'
+                          }`}
                         >
-                          Place Order to Kitchen ({state.currencySymbol}
-                          {cartTotal})
+                          Swipe Deck
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setGuestDisplayMode('list')}
+                          className={`px-2 py-0.5 rounded-[5px] font-mono-code text-[10px] font-bold cursor-pointer ${
+                            guestDisplayMode === 'list'
+                              ? 'bg-[#1A0C06] text-[#FBEFE6]'
+                              : 'text-[#6C625C]'
+                          }`}
+                        >
+                          List
                         </button>
                       </div>
+                    </div>
+
+                    <div
+                      className="flex items-center gap-1.5 overflow-x-auto pb-0.5"
+                      role="tablist"
+                      aria-label="Menu sub-sections"
+                    >
+                      {categories.map((cat) => {
+                        const count =
+                          cat === 'All'
+                            ? state.dishes.filter((d) => d.isAvailable).length
+                            : state.dishes.filter((d) => d.category === cat && d.isAvailable)
+                                .length;
+                        return (
+                          <button
+                            key={cat}
+                            type="button"
+                            role="tab"
+                            aria-selected={selectedCategory === cat}
+                            data-testid={`subsection-tab-${cat.toLowerCase().replace(/\s+/g, '-')}`}
+                            onClick={() => handleSelectSubSection(cat)}
+                            className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                              selectedCategory === cat
+                                ? 'bg-[#E8500C] text-[#FBEFE6]'
+                                : 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] hover:border-[#1A0C06]'
+                            }`}
+                          >
+                            {cat} ({count})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {guestDisplayMode === 'swipe' ? (
+                    <div className="p-3.5 flex flex-col gap-3">
+                      {/* Deck Progress & Instructions Bar */}
+                      <div className="flex items-center justify-between text-[11px] font-mono-code text-[#6C625C]">
+                        <span>
+                          {currentDeckDish
+                            ? `Card ${deckIndex + 1} of ${filteredDishes.length} · ${selectedCategory}`
+                            : `${selectedCategory} Complete`}
+                        </span>
+                        <span>← Left: Skip · Right: In Cart →</span>
+                      </div>
+
+                      {/* Last Swipe Feedback Pill */}
+                      {lastSwipeFeedback && (
+                        <div className="px-3 py-1 rounded-[8px] bg-[#F3ECE5] text-[11px] font-mono-code flex items-center justify-between">
+                          <span>
+                            {lastSwipeFeedback.type === 'add' ? '✓ Added to Cart:' : '↷ Skipped:'}{' '}
+                            <strong>{lastSwipeFeedback.dishName}</strong>
+                          </span>
+                          <span className="text-[#6C625C]">Skipped: {skippedIds.length}</span>
+                        </div>
+                      )}
+
+                      {currentDeckDish ? (
+                        <>
+                          {/* Interactive Swipe Card Stack */}
+                          <div className="relative h-[300px] w-full select-none">
+                            {/* Next card preview underneath */}
+                            {nextDeckDish && (
+                              <div
+                                aria-hidden="true"
+                                className="absolute inset-x-3 top-2 bottom-0 rounded-[18px] bg-[#F3ECE5] border border-[#E3D9D3] scale-[0.96] translate-y-2 opacity-70 pointer-events-none"
+                              />
+                            )}
+
+                            {/* Active Dish Card */}
+                            <div
+                              data-testid="active-swipe-dish-card"
+                              onPointerDown={handlePointerDown}
+                              onPointerMove={handlePointerMove}
+                              onPointerUp={handlePointerUp}
+                              onPointerCancel={handlePointerUp}
+                              style={{
+                                transform: `translate3d(${effectiveX}px, ${dragOffset.y}px, 0) rotate(${effectiveRotate}deg)`,
+                                transition: isDragging
+                                  ? 'none'
+                                  : 'transform 0.18s cubic-bezier(0.22, 1, 0.36, 1)',
+                                touchAction: 'pan-y',
+                              }}
+                              className="relative h-full w-full rounded-[18px] bg-[#FFFFFF] border-2 border-[#1A0C06] overflow-hidden flex flex-col justify-between cursor-grab active:cursor-grabbing"
+                            >
+                              {/* Swipe Stamp Overlays */}
+                              {showAddStamp && (
+                                <div className="absolute top-3 left-3 z-20 px-3 py-1 rounded-[8px] bg-[#C4F042] text-[#140905] border-2 border-[#140905] font-mono-code text-[12px] font-bold uppercase tracking-wider">
+                                  IN CART +
+                                </div>
+                              )}
+                              {showSkipStamp && (
+                                <div className="absolute top-3 right-3 z-20 px-3 py-1 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] border-2 border-[#140905] font-mono-code text-[12px] font-bold uppercase tracking-wider">
+                                  SKIPPED ←
+                                </div>
+                              )}
+
+                              {/* Dish Visual Header */}
+                              <div className="relative h-[145px] bg-[#140905] overflow-hidden">
+                                {currentDeckDish.imageUrl ? (
+                                  <img
+                                    src={currentDeckDish.imageUrl}
+                                    alt={currentDeckDish.name}
+                                    draggable={false}
+                                    className="w-full h-full object-cover opacity-90 pointer-events-none"
+                                  />
+                                ) : (
+                                  <div
+                                    className="w-full h-full flex items-center justify-center"
+                                    style={{ backgroundColor: currentDeckDish.plateColor }}
+                                  />
+                                )}
+                                <div
+                                  className="absolute inset-0 pointer-events-none"
+                                  style={{
+                                    background:
+                                      'linear-gradient(to top, rgba(20,9,5,0.85) 0%, rgba(20,9,5,0.15) 65%)',
+                                  }}
+                                />
+
+                                <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between gap-1">
+                                  <span className="px-2 py-0.5 rounded-[6px] bg-[#140905]/85 text-[#FBEFE6] font-mono-code text-[10px] font-semibold">
+                                    {currentDeckDish.category}
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    {currentDeckDish.prepTime && (
+                                      <span className="px-2 py-0.5 rounded-[6px] bg-[#140905]/85 text-[#FBEFE6] font-mono-code text-[10px]">
+                                        {currentDeckDish.prepTime}
+                                      </span>
+                                    )}
+                                    <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold">
+                                      {currentDeckDish.dietary}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="absolute bottom-2.5 left-3 right-3 flex items-end justify-between text-[#FBEFE6]">
+                                  <h4 className="text-[16px] font-bold leading-snug m-0 pr-2">
+                                    {currentDeckDish.name}
+                                  </h4>
+                                  <span className="font-mono-code text-[16px] font-bold text-[#C4F042] shrink-0 tabular-nums">
+                                    {state.currencySymbol}
+                                    {currentDeckDish.price}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Dish Card Body */}
+                              <div className="p-3.5 flex-1 flex flex-col justify-between bg-[#FFFFFF]">
+                                <p className="text-[12px] text-[#6C625C] leading-relaxed m-0 line-clamp-2">
+                                  {currentDeckDish.description}
+                                </p>
+
+                                <div className="flex items-center justify-between pt-2 border-t border-[#E3D9D3] text-[11px] font-mono-code">
+                                  <span className="text-[#6C625C]">
+                                    Drag card left or right
+                                  </span>
+                                  {state.cart.find((c) => c.dish.id === currentDeckDish.id) ? (
+                                    <span className="px-2 py-0.5 rounded bg-[#FFEEE3] text-[#C03E0A] font-bold">
+                                      In Cart:{' '}
+                                      {
+                                        state.cart.find((c) => c.dish.id === currentDeckDish.id)
+                                          ?.qty
+                                      }
+                                    </span>
+                                  ) : (
+                                    <span className="text-[#1A0C06] font-semibold">
+                                      Not in cart yet
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Swipe Deck Action Controls: Left = Skip, Undo, Right = In Cart */}
+                          <div className="grid grid-cols-7 gap-2 pt-1">
+                            <button
+                              type="button"
+                              data-testid="swipe-left-skip-btn"
+                              onClick={() => triggerSwipeAction('left')}
+                              className="col-span-3 h-10 rounded-[10px] bg-[#F3ECE5] hover:bg-[#E3D9D3] border border-[#1A0C06]/20 text-[#1A0C06] font-mono-code text-[11px] font-bold cursor-pointer transition-colors"
+                            >
+                              ← Swipe Left (Skip)
+                            </button>
+
+                            <button
+                              type="button"
+                              data-testid="swipe-undo-btn"
+                              onClick={handleUndoSwipe}
+                              disabled={swipeHistory.length === 0}
+                              title="Undo last swipe"
+                              className="col-span-1 h-10 rounded-[10px] bg-[#FFFFFF] border border-[#E3D9D3] disabled:opacity-40 text-[#1A0C06] font-mono-code text-[11px] font-bold cursor-pointer"
+                            >
+                              ↺
+                            </button>
+
+                            <button
+                              type="button"
+                              data-testid="swipe-right-add-btn"
+                              onClick={() => triggerSwipeAction('right')}
+                              className="col-span-3 h-10 rounded-[10px] bg-[#1A0C06] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer transition-colors"
+                            >
+                              {state.serviceLevel >= 2
+                                ? 'Swipe Right (Cart +) →'
+                                : 'Next Card →'}
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        /* Deck Complete State ("Done Picking!") */
+                        <div
+                          data-testid="swipe-deck-complete"
+                          className="p-5 rounded-[18px] bg-[#F7F2ED] border-2 border-[#1A0C06] text-center flex flex-col items-center gap-3"
+                        >
+                          <span className="px-2.5 py-0.5 rounded-[6px] bg-[#C4F042] text-[#140905] font-mono-code text-[10px] font-bold uppercase">
+                            DONE PICKING · {selectedCategory}
+                          </span>
+                          <h4 className="text-[17px] font-bold text-[#1A0C06] m-0">
+                            You swiped through all dishes in {selectedCategory}!
+                          </h4>
+                          <p className="text-[12px] text-[#6C625C] m-0">
+                            Picked <strong>{cartCount} items</strong> ({state.currencySymbol}
+                            {cartTotal}) · Skipped {skippedIds.length} dishes.
+                          </p>
+
+                          <div className="w-full flex flex-col gap-2 pt-1">
+                            {state.serviceLevel >= 2 && (
+                              <button
+                                type="button"
+                                data-testid="deck-done-open-cart-btn"
+                                onClick={() => {
+                                  soundFX.play('tap');
+                                  setGuestStep('cart');
+                                }}
+                                className="w-full h-10 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[12px] font-bold uppercase cursor-pointer"
+                              >
+                                Done Picking · Click Cart ({cartCount} items ·{' '}
+                                {state.currencySymbol}
+                                {cartTotal}) →
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDeckIndex(0);
+                                setSwipeHistory([]);
+                              }}
+                              className="w-full h-9 rounded-[10px] bg-[#FFFFFF] border border-[#1A0C06] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer"
+                            >
+                              ↺ Swipe {selectedCategory} Deck Again
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    /* Optional Compact List View */
+                    <div className="p-3.5 flex flex-col gap-2.5 max-h-[340px] overflow-y-auto">
+                      {filteredDishes.map((dish) => {
+                        const inCart = state.cart.find((c) => c.dish.id === dish.id);
+                        return (
+                          <div
+                            key={dish.id}
+                            className="p-3 rounded-[14px] border border-[#E3D9D3] bg-[#F7F2ED]/60 flex items-center justify-between gap-3"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
+                                {dish.name}
+                              </div>
+                              <div className="text-[11px] text-[#6C625C] truncate">
+                                {dish.category} · {dish.description}
+                              </div>
+                              <div className="font-mono-code text-[12px] font-bold text-[#1A0C06] mt-0.5 tabular-nums">
+                                {state.currencySymbol}
+                                {dish.price}
+                              </div>
+                            </div>
+
+                            {state.serviceLevel >= 2 && (
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {inCart && inCart.qty > 0 && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveFromCart(dish.id)}
+                                      className="w-7 h-7 rounded-[8px] bg-[#F3ECE5] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
+                                    >
+                                      -
+                                    </button>
+                                    <span className="font-mono-code text-[12px] font-bold w-4 text-center tabular-nums">
+                                      {inCart.qty}
+                                    </span>
+                                  </>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleAddToCart(dish)}
+                                  className="px-2.5 h-7 rounded-[8px] bg-[#1A0C06] hover:bg-[#E8500C] text-[#FBEFE6] font-semibold text-[12px] cursor-pointer transition-colors"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Guest Sticky Bottom Bar: Done Picking -> Click the Cart */}
+                  <div className="p-3.5 bg-[#F7F2ED] border-t border-[#E3D9D3] flex flex-col gap-2">
+                    {state.serviceLevel === 1 ? (
+                      <div className="flex items-center justify-between text-[12px] text-[#6C625C]">
+                        <span>Level 1 · Browse-Only Swipe Deck</span>
+                        <span className="font-mono-code">Switch to L2 / L3 for Cart</span>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid="guest-open-cart-btn"
+                        onClick={() => {
+                          soundFX.play('tap');
+                          setGuestStep('cart');
+                        }}
+                        className="w-full h-11 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer transition-colors flex items-center justify-between px-4"
+                      >
+                        <span>Done Picking · Click Cart ({cartCount})</span>
+                        <span className="tabular-nums">
+                          {state.currencySymbol}
+                          {cartTotal} →
+                        </span>
+                      </button>
                     )}
-                  </>
-                )}
-              </div>
+                  </div>
+                </>
+              )}
             </section>
           )}
 
@@ -961,7 +1726,7 @@ export default function App() {
               <div className="bg-[#2A180D] px-4 py-3 border-b border-[#F7F2ED]/10 flex items-center justify-between">
                 <div>
                   <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
-                    SURFACE 2 · WAITER APK
+                    SURFACE 2 · WAITER PHONE APK
                   </span>
                   <h3 className="text-[15px] font-bold text-[#FBEFE6] m-0">
                     com.buildbros.waiter
@@ -1026,7 +1791,7 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="p-3.5 flex flex-col gap-3 max-h-[380px] overflow-y-auto">
+              <div className="p-3.5 flex flex-col gap-3 max-h-[420px] overflow-y-auto">
                 {waiterTab === 'calls' &&
                   state.waiterCalls.map((call) => (
                     <div
@@ -1060,6 +1825,7 @@ export default function App() {
                         {call.status === 'pending' && (
                           <button
                             type="button"
+                            data-testid={`waiter-ack-${call.tableNumber}-btn`}
                             onClick={() => handleWaiterAcknowledge(call.id)}
                             className="px-3 py-1.5 rounded-[8px] bg-[#C4F042] text-[#140905] font-bold text-[12px] cursor-pointer"
                           >

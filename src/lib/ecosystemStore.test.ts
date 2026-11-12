@@ -9,10 +9,12 @@ import {
   FCM_VAPID_PUBLIC_KEY,
 } from './ecosystemStore';
 
-test('Cafe Ecosystem initializes with 12 tables, Supabase URL, publishable key, and FCM VAPID key', () => {
+test('Cafe Ecosystem initializes with 12 tables, 10 dishes across 5 sub-sections, Supabase URL, publishable key, and FCM VAPID key', () => {
   const state = createInitialCafeState();
   assert.equal(state.tables.length, 12);
-  assert.equal(state.dishes.length, 6);
+  assert.equal(state.dishes.length, 10);
+  const categories = Array.from(new Set(state.dishes.map((d) => d.category)));
+  assert.deepEqual(categories, ['Coffee', 'Cold Bar', 'Kitchen Mains', 'All-Day Plates', 'Bakery']);
   assert.ok(SUPABASE_PROJECT_URL.includes('vidryxsmxjvtcgbvrfix.supabase.co'));
   assert.ok(SUPABASE_PUBLISHABLE_KEY.startsWith('sb_publishable_'));
   assert.ok(FCM_VAPID_PUBLIC_KEY.length > 20);

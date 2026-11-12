@@ -1,10 +1,27 @@
-# Build Bros — Full Product Architecture & Engineering Blueprint (`product.md`)
+# Build Bros — The Cafe Ecosystem (Full Product & Direct Android APKs)
 
-This document is the master blueprint for building and shipping the actual **Build Bros Digital Ordering System** across all four surfaces:
-1. **Guest Web Menu** (Zero-app mobile browser experience triggered by Table QR)
-2. **Waiter Dedicated Android APK** (`com.buildbros.waiter` — instant table call alerts & floor management with background push notifications)
-3. **Kitchen & Reception Dedicated Android APK** (`com.buildbros.kitchen` — real-time KDS ticket board, reception confirmation & wake-lock audio chimes)
-4. **Owner / Admin Dedicated Android APK** (`com.buildbros.admin` — live floor monitor, instant price/dish editor, sold-out toggles & table QR manager that updates every screen in under 1 second)
+This repository (`https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem`) contains the complete **Build Bros Digital Ordering System** across all four operational surfaces:
+
+## Direct Android Phone APK Downloads (Waiter · Kitchen · Owner)
+
+Every push to `main` automatically compiles the three dedicated Android `.apk` packages via GitHub Actions (`.github/workflows/build-apks.yml`) and publishes them to [GitHub Releases (`latest`)](https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/releases/latest):
+
+| Staff Surface | Android Package ID | Direct `.apk` Download Link | Full-Screen Web Launch Parameter |
+| :--- | :--- | :--- | :--- |
+| **1. Waiter Phone APK** | `com.buildbros.waiter` | [**Download `buildbros-waiter.apk`**](https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/releases/latest/download/buildbros-waiter.apk) | `?apk=waiter` |
+| **2. Kitchen & Reception KDS APK** | `com.buildbros.kitchen` | [**Download `buildbros-kitchen.apk`**](https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/releases/latest/download/buildbros-kitchen.apk) | `?apk=kitchen` |
+| **3. Owner / Admin Phone APK** | `com.buildbros.admin` | [**Download `buildbros-admin.apk`**](https://github.com/varchasvaateeksh77-ui/the-cafe-ecosystem/releases/latest/download/buildbros-admin.apk) | `?apk=admin` |
+| **4. Guest Swipe Deck Web Menu** | Browser (Zero App Install) | Triggered via Table QR (`?apk=guest&table=5`) | `?apk=guest` |
+
+### Guest Swipe Deck Menu Workflow
+- **Category Sub-Sections**: Guests filter cards by sub-section (`All`, `Coffee`, `Cold Bar`, `Kitchen Mains`, `All-Day Plates`, `Bakery`).
+- **Interactive Dish Cards**:
+  - **Swipe Left (`← Skip`)**: Dish is skipped and advances to the next card.
+  - **Swipe Right (`Cart + →`)**: Dish is added to the table cart and advances to the next card.
+- **Done Picking → Click the Cart**:
+  - Clicking **Cart** opens the Table Cart drawer showing all picked dishes, `+`/`-` quantity controls, and total.
+  - **In Level 2 (`Waiter Call`)**: Cart displays the **Call the Waiter** button (`Call the Waiter (Table X)`), alerting `com.buildbros.waiter` in real time with the cart snapshot.
+  - **In Level 3 (`Full Ordering`)**: Cart displays the **Send the Order** button (`Send the Order (Table X)`), dispatching the ticket directly to `com.buildbros.kitchen` with a live 4-stage tracker (`Incoming → New → Cooking → Ready → Served`).
 
 ---
 

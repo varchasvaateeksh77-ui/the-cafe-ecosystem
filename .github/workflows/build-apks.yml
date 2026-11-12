@@ -1,0 +1,105 @@
+name: Build Android APKs (Waiter, Kitchen, Owner Admin)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java 21 for Android Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Root Dependencies & Capacitor Android
+        run: |
+          npm install
+          npm install --no-save @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0
+
+      - name: Build 1 - Waiter Phone APK (com.buildbros.waiter)
+        run: |
+          VITE_DEFAULT_APK=waiter npm run build
+          cat > capacitor.config.json << 'EOF'
+          {
+            "appId": "com.buildbros.waiter",
+            "appName": "Build Bros Waiter",
+            "webDir": "dist",
+            "bundledWebRuntime": false
+          }
+          EOF
+          rm -rf android
+          npx cap add android
+          cd android && chmod +x gradlew && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-waiter.apk
+
+      - name: Build 2 - Kitchen & Reception KDS APK (com.buildbros.kitchen)
+        run: |
+          VITE_DEFAULT_APK=kitchen npm run build
+          cat > capacitor.config.json << 'EOF'
+          {
+            "appId": "com.buildbros.kitchen",
+            "appName": "Build Bros Kitchen KDS",
+            "webDir": "dist",
+            "bundledWebRuntime": false
+          }
+          EOF
+          rm -rf android
+          npx cap add android
+          cd android && chmod +x gradlew && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-kitchen.apk
+
+      - name: Build 3 - Owner Admin Phone APK (com.buildbros.admin)
+        run: |
+          VITE_DEFAULT_APK=admin npm run build
+          cat > capacitor.config.json << 'EOF'
+          {
+            "appId": "com.buildbros.admin",
+            "appName": "Build Bros Owner Admin",
+            "webDir": "dist",
+            "bundledWebRuntime": false
+          }
+          EOF
+          rm -rf android
+          npx cap add android
+          cd android && chmod +x gradlew && ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../buildbros-admin.apk
+
+      - name: Upload 3 Android APKs as Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildbros-cafe-ecosystem-apks
+          path: |
+            buildbros-waiter.apk
+            buildbros-kitchen.apk
+            buildbros-admin.apk
+
+      - name: Publish Direct Download APKs to GitHub Release (latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete v1.0.0 --yes --cleanup-tag || true
+          gh release create v1.0.0 \
+            buildbros-waiter.apk \
+            buildbros-kitchen.apk \
+            buildbros-admin.apk \
+            --title "The Cafe Ecosystem — Direct Android Phone APKs (v1.0.0)" \
+            --notes "Direct installable Android APKs for staff phones:
+            - **Waiter Phone APK** (\`buildbros-waiter.apk\` · \`com.buildbros.waiter\`)
+            - **Kitchen & Reception KDS APK** (\`buildbros-kitchen.apk\` · \`com.buildbros.kitchen\`)
+            - **Owner / Admin Phone APK** (\`buildbros-admin.apk\` · \`com.buildbros.admin\`)" \
+            --latest

@@ -860,6 +860,7 @@ export const LiveThemeInstance: React.FC<LiveThemeInstanceProps> = ({
                       {serviceLevel === 2 ? (
                         <button
                           type="button"
+                          data-testid="theme-cart-call-waiter-btn"
                           onClick={() => handleCallWaiterFromCartOrHeader(true)}
                           style={{
                             backgroundColor: baseTheme.palette.accent,
@@ -869,12 +870,13 @@ export const LiveThemeInstance: React.FC<LiveThemeInstanceProps> = ({
                           className="w-full sm:w-auto px-8 py-3.5 font-mono-code text-[13px] font-bold uppercase tracking-[0.1em] cursor-pointer"
                         >
                           {activeStandbyCall
-                            ? 'Waiter Called · Ping Waiter Again'
-                            : `Call Waiter to Confirm Order · ${baseTheme.currencySymbol}${cartSummary.subtotal.toFixed(2)} →`}
+                            ? 'Waiter Called · Call the Waiter Again'
+                            : `Call the Waiter (Table ${tableNumber}) · ${baseTheme.currencySymbol}${cartSummary.subtotal.toFixed(2)} →`}
                         </button>
                       ) : (
                         <button
                           type="button"
+                          data-testid="theme-cart-send-order-btn"
                           onClick={handlePlaceOrder}
                           style={{
                             backgroundColor: baseTheme.palette.accent,
@@ -883,7 +885,7 @@ export const LiveThemeInstance: React.FC<LiveThemeInstanceProps> = ({
                           }}
                           className="w-full sm:w-auto px-8 py-3.5 font-mono-code text-[13px] font-bold uppercase tracking-[0.1em] cursor-pointer"
                         >
-                          Place Order for Table {tableNumber} ·{' '}
+                          Send the Order (Table {tableNumber}) ·{' '}
                           {baseTheme.currencySymbol}
                           {cartSummary.subtotal.toFixed(2)} →
                         </button>
