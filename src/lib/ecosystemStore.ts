@@ -1,0 +1,310 @@
+import { createClient } from '@supabase/supabase-js';
+
+const env = (import.meta as unknown as { env?: Record<string, string> })?.env || {};
+
+export const SUPABASE_PROJECT_URL =
+  env.VITE_SUPABASE_URL || 'https://vidryxsmxjvtcgbvrfix.supabase.co';
+export const SUPABASE_REST_ENDPOINT =
+  env.VITE_SUPABASE_REST_URL || 'https://vidryxsmxjvtcgbvrfix.supabase.co/rest/v1/';
+export const SUPABASE_PUBLISHABLE_KEY =
+  env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Ypt97zDNyK14_Jv5LRvbeA_rcDstDlV';
+export const FCM_VAPID_PUBLIC_KEY =
+  env.VITE_FCM_VAPID_KEY ||
+  'BDHHUeG53kBo0731JU9vEMkaqebz7x0Set-km70k02gdHe5pW1lxPeb5VXvducVTV4yQiBz-Hkt7Ds1zCM1IyGo';
+
+export const supabase = createClient(SUPABASE_PROJECT_URL, SUPABASE_PUBLISHABLE_KEY, {
+  realtime: {
+    params: { eventsPerSecond: 20 },
+  },
+});
+
+export type ServiceLevel = 1 | 2 | 3;
+export type FloorTableStatus =
+  | 'free'
+  | 'browsing'
+  | 'waiter_called'
+  | 'ordering'
+  | 'cooking'
+  | 'ready'
+  | 'served';
+
+export interface DishItem {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  category: string;
+  dietary: 'Veg' | 'Non-Veg' | 'Chef Special' | 'Spicy';
+  plateColor: string;
+  isAvailable: boolean;
+}
+
+export interface CartItem {
+  dish: DishItem;
+  qty: number;
+}
+
+export interface WaiterCall {
+  id: string;
+  tableNumber: number;
+  cartSnapshot: CartItem[];
+  cartTotal: number;
+  status: 'pending' | 'acknowledged' | 'completed';
+  acknowledgedBy?: string;
+  createdAt: string;
+}
+
+export interface KitchenOrder {
+  id: string;
+  ticketNumber: string;
+  tableNumber: number;
+  items: CartItem[];
+  totalAmount: number;
+  receptionConfirmed: boolean;
+  status: 'incoming' | 'new' | 'cooking' | 'ready' | 'served';
+  notes: string;
+  createdAt: string;
+}
+
+export interface FloorTable {
+  tableNumber: number;
+  shape: 'round' | 'square';
+  seats: number;
+  status: FloorTableStatus;
+  activeTicket?: string;
+  cartTotal?: number;
+  updatedAt: string;
+}
+
+export interface PushNotificationEvent {
+  id: string;
+  timestamp: string;
+  targetApk: 'com.buildbros.waiter' | 'com.buildbros.kitchen' | 'com.buildbros.admin' | 'guest-web';
+  channel: string;
+  title: string;
+  body: string;
+  latencyMs: number;
+}
+
+export interface CafeEcosystemState {
+  venueName: string;
+  venueSlug: string;
+  serviceLevel: ServiceLevel;
+  autoRouteToKitchen: boolean;
+  currencySymbol: string;
+  activeTable: number;
+  dishes: DishItem[];
+  cart: CartItem[];
+  waiterCalls: WaiterCall[];
+  orders: KitchenOrder[];
+  tables: FloorTable[];
+  pushEvents: PushNotificationEvent[];
+  realtimeConnected: boolean;
+  lastSyncLatencyMs: number;
+}
+
+export const INITIAL_DISHES: DishItem[] = [
+  {
+    id: 'd-1',
+    name: 'Single Origin Flat White',
+    description: 'Double ristretto over velvety micro-foam milk',
+    price: 240,
+    category: 'Coffee',
+    dietary: 'Veg',
+    plateColor: '#C88A5A',
+    isAvailable: true,
+  },
+  {
+    id: 'd-2',
+    name: 'Yuzu Cold Brew Tonic',
+    description: '18-hour steeped estate arabica with citrus tonic',
+    price: 280,
+    category: 'Cold Bar',
+    dietary: 'Chef Special',
+    plateColor: '#D97B38',
+    isAvailable: true,
+  },
+  {
+    id: 'd-3',
+    name: 'Truffle Brioche Smash Burger',
+    description: 'Crispy lacy edges, aged cheddar, house pickle & brioche bun',
+    price: 490,
+    category: 'Kitchen Mains',
+    dietary: 'Chef Special',
+    plateColor: '#8C3F19',
+    isAvailable: true,
+  },
+  {
+    id: 'd-4',
+    name: 'Chilli Crisp Sourdough Toast',
+    description: 'Whipped ricotta, house chilli oil, toasted sesame on country loaf',
+    price: 360,
+    category: 'All-Day Plates',
+    dietary: 'Spicy',
+    plateColor: '#D64924',
+    isAvailable: true,
+  },
+  {
+    id: 'd-5',
+    name: 'Burnt Basque Cheesecake',
+    description: 'Caramelized crust, creamy vanilla bean center',
+    price: 340,
+    category: 'Bakery',
+    dietary: 'Veg',
+    plateColor: '#E2B46D',
+    isAvailable: true,
+  },
+  {
+    id: 'd-6',
+    name: '70% Dark Chocolate Sea Salt Brownie',
+    description: 'Warm Valrhona fudge brownie with Maldon sea salt',
+    price: 260,
+    category: 'Bakery',
+    dietary: 'Veg',
+    plateColor: '#4A2511',
+    isAvailable: true,
+  },
+];
+
+export const INITIAL_TABLES: FloorTable[] = [
+  { tableNumber: 1, shape: 'round', seats: 2, status: 'served', cartTotal: 520, updatedAt: '4m ago' },
+  { tableNumber: 2, shape: 'round', seats: 2, status: 'free', updatedAt: '12m ago' },
+  { tableNumber: 3, shape: 'square', seats: 4, status: 'cooking', activeTicket: '#0410', cartTotal: 1120, updatedAt: '3m ago' },
+  { tableNumber: 4, shape: 'round', seats: 2, status: 'browsing', updatedAt: '1m ago' },
+  { tableNumber: 5, shape: 'square', seats: 4, status: 'ordering', activeTicket: '#0412', cartTotal: 970, updatedAt: 'Just now' },
+  { tableNumber: 6, shape: 'square', seats: 4, status: 'ready', activeTicket: '#0411', cartTotal: 840, updatedAt: 'Just now' },
+  { tableNumber: 7, shape: 'round', seats: 2, status: 'free', updatedAt: '9m ago' },
+  { tableNumber: 8, shape: 'square', seats: 6, status: 'browsing', updatedAt: '2m ago' },
+  { tableNumber: 9, shape: 'round', seats: 2, status: 'free', updatedAt: '18m ago' },
+  { tableNumber: 10, shape: 'square', seats: 4, status: 'served', cartTotal: 1460, updatedAt: '7m ago' },
+  { tableNumber: 11, shape: 'round', seats: 2, status: 'free', updatedAt: '15m ago' },
+  { tableNumber: 12, shape: 'square', seats: 6, status: 'free', updatedAt: '11m ago' },
+];
+
+export function calculateCartTotal(cart: CartItem[]): number {
+  return cart.reduce((sum, item) => sum + item.dish.price * item.qty, 0);
+}
+
+export function createInitialCafeState(): CafeEcosystemState {
+  const dishes = INITIAL_DISHES.map((d) => ({ ...d }));
+  const initialCart: CartItem[] = [
+    { dish: dishes[0], qty: 2 },
+    { dish: dishes[2], qty: 1 },
+  ];
+  const cartTotal = calculateCartTotal(initialCart);
+  const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  return {
+    venueName: 'Roast & Co. Flagship',
+    venueSlug: 'roast-and-co',
+    serviceLevel: 3,
+    autoRouteToKitchen: false,
+    currencySymbol: '₹',
+    activeTable: 5,
+    dishes,
+    cart: initialCart,
+    waiterCalls: [
+      {
+        id: 'wc-501',
+        tableNumber: 5,
+        cartSnapshot: initialCart,
+        cartTotal,
+        status: 'pending',
+        createdAt: now,
+      },
+    ],
+    orders: [
+      {
+        id: 'ord-412',
+        ticketNumber: '#0412',
+        tableNumber: 5,
+        items: initialCart,
+        totalAmount: cartTotal,
+        receptionConfirmed: false,
+        status: 'incoming',
+        notes: 'Extra hot flat white',
+        createdAt: now,
+      },
+      {
+        id: 'ord-411',
+        ticketNumber: '#0411',
+        tableNumber: 6,
+        items: [
+          { dish: dishes[1], qty: 2 },
+          { dish: dishes[4], qty: 1 },
+        ],
+        totalAmount: 900,
+        receptionConfirmed: true,
+        status: 'ready',
+        notes: '',
+        createdAt: now,
+      },
+    ],
+    tables: INITIAL_TABLES.map((t) => ({ ...t })),
+    pushEvents: [
+      {
+        id: 'evt-1',
+        timestamp: now,
+        targetApk: 'com.buildbros.kitchen',
+        channel: 'supabase_realtime:orders',
+        title: 'New Order #0412 · Table 5',
+        body: '2x Single Origin Flat White, 1x Truffle Brioche Smash Burger',
+        latencyMs: 134,
+      },
+      {
+        id: 'evt-2',
+        timestamp: now,
+        targetApk: 'com.buildbros.waiter',
+        channel: 'fcm:waiter_calls_urgent',
+        title: 'PICKUP READY · Ticket #0411',
+        body: 'Table 6 order ready at kitchen pass — Tap to serve',
+        latencyMs: 162,
+      },
+    ],
+    realtimeConnected: false,
+    lastSyncLatencyMs: 134,
+  };
+}
+
+export function applyAdminDishPatch(
+  state: CafeEcosystemState,
+  dishId: string,
+  patch: Partial<DishItem>
+): CafeEcosystemState {
+  const nextDishes = state.dishes.map((d) => (d.id === dishId ? { ...d, ...patch } : d));
+  const nextCart = state.cart
+    .map((c) => {
+      if (c.dish.id !== dishId) return c;
+      const updated = nextDishes.find((d) => d.id === dishId);
+      if (!updated || !updated.isAvailable) return null;
+      return { ...c, dish: updated };
+    })
+    .filter((c): c is CartItem => Boolean(c));
+
+  const target = nextDishes.find((d) => d.id === dishId);
+  const latencyMs = Math.floor(105 + Math.random() * 80);
+  const now = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const event: PushNotificationEvent = {
+    id: `evt-${Date.now()}`,
+    timestamp: now,
+    targetApk: 'guest-web',
+    channel: 'supabase_realtime:menu_items',
+    title: `Admin Updated: ${target?.name || dishId}`,
+    body:
+      patch.isAvailable !== undefined
+        ? patch.isAvailable
+          ? 'Restocked Available on all guest phones'
+          : 'Marked 86 SOLD OUT — hidden on all guest phones'
+        : `Price updated to ${state.currencySymbol}${target?.price} across all tables`,
+    latencyMs,
+  };
+
+  return {
+    ...state,
+    dishes: nextDishes,
+    cart: nextCart,
+    lastSyncLatencyMs: latencyMs,
+    pushEvents: [event, ...state.pushEvents.slice(0, 19)],
+  };
+}

@@ -1,0 +1,41 @@
+:root {
+  --page:        #F7F2ED;
+  --page-alt:    #F4EFEA;
+  --card:        #FFFFFF;
+  --ink:         #1A0C06;
+  --body:        #6C625C;
+  --faint:       #B6AEA7;
+  --accent:      #E8500C;
+  --accent-text: #C03E0A;
+  --chip:        #F3ECE5;
+  --peach:       #FFEEE3;
+  --dark:        #140905;
+  --line:        #E3D9D3;
+  --on-dark:     #FBEFE6;
+
+  --hero-gradient: linear-gradient(
+    180deg,
+    #250F07 0%,
+    #371307 15%,
+    #441807 23%,
+    #5C1C07 31%,
+    #741F05 38%,
+    #892808 46%,
+    #B63B0C 54%,
+    #E15010 61%,
+    #FD671E 69%,
+    #FF8741 77%,
+    #FFB582 85%,
+    #FCD7BE 92%,
+    #F4EDE6 100%
+  );
+
+  --font-sans: "Google Sans Flex", "Figtree", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Google Sans Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --radius-card: 24px;
+  --radius-nav: 20px;
+  --radius-btn: 12px;
+  --radius-chip: 12px;
+  --radius-pill: 9999px;
+}

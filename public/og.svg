@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <linearGradient id="heroGrad" x1="0" y1="0" x2="0" y2="630" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#250F07"/>
+      <stop offset="38%" stop-color="#741F05"/>
+      <stop offset="61%" stop-color="#E15010"/>
+      <stop offset="77%" stop-color="#FF8741"/>
+      <stop offset="100%" stop-color="#F7F2ED"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#heroGrad)"/>
+  <rect x="64" y="64" width="1072" height="502" rx="24" fill="#140905" stroke="#FFEEE3" stroke-width="2"/>
+  <rect x="104" y="104" width="520" height="422" rx="16" stroke="#F7F2ED" stroke-opacity="0.2" stroke-width="1.5"/>
+  <circle cx="364" cy="315" r="42" fill="#E8500C"/>
+  <text x="668" y="250" fill="#FBEFE6" font-family="sans-serif" font-size="56" font-weight="600">Build Bros</text>
+  <text x="668" y="320" fill="#FBEFE6" font-family="sans-serif" font-size="28" opacity="0.85">Digital ordering for cafes</text>
+  <text x="668" y="360" fill="#FBEFE6" font-family="sans-serif" font-size="28" opacity="0.85">and restaurants.</text>
+  <rect x="668" y="405" width="210" height="48" rx="12" fill="#E8500C"/>
+  <text x="702" y="436" fill="#FBEFE6" font-family="sans-serif" font-size="20" font-weight="600">Table 5 · Live</text>
+</svg>

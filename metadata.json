@@ -1,0 +1,6 @@
+{
+  "name": "Build Bros — Digital Ordering & Live Restaurant Suite",
+  "description": "Introduction site and interactive 4-surface live ordering platform (Guest Web Menu, Waiter APK, Kitchen KDS APK, and Owner Admin APK) powered by Supabase Realtime and FCM.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
