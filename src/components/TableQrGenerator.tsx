@@ -232,15 +232,15 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
 
   return (
     <div className="flex flex-col gap-5" data-testid="admin-qr-generator">
-      {/* Top Controls Bar: Base URL, Subtitle, Add Table, Print All Sheet */}
-      <div className="p-4 rounded-[16px] bg-[#F7F2ED] border border-[#E3D9D3] flex flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* Top Controls Bar */}
+      <div className="p-4 sm:p-5 rounded-[12px] bg-[#FAF8F5] border border-[#E4E0D8] flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <span className="font-mono-code text-[11px] font-bold uppercase text-[#C03E0A] block">
-              DIRECT WORKING TABLE QR GENERATOR · {tables.length} TABLES
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-[#D9480F] block">
+              Direct Table QR Generator · {tables.length} Tables
             </span>
-            <h3 className="text-[16px] font-bold text-[#1A0C06] m-0">
-              Export Print-Ready Table QR Plaques (PNG / SVG / Print Sheet)
+            <h3 className="font-display text-[18px] font-semibold text-[#181615] m-0 mt-0.5">
+              Export Print-Ready Table QR Plaques
             </h3>
           </div>
 
@@ -249,7 +249,7 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
               type="button"
               data-testid="qr-add-table-btn"
               onClick={onAddTable}
-              className="px-3 py-1.5 rounded-[8px] bg-[#FFFFFF] border border-[#1A0C06] text-[#1A0C06] font-mono-code text-[11px] font-bold cursor-pointer hover:bg-[#F3ECE5]"
+              className="min-h-[38px] px-3.5 rounded-[8px] bg-[#FFFFFF] border border-[#E4E0D8] hover:border-[#181615] text-[#181615] text-[12px] font-semibold cursor-pointer whitespace-nowrap"
             >
               + Add Table #{tables.length + 1}
             </button>
@@ -257,11 +257,11 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
               type="button"
               data-testid="qr-toggle-print-sheet-btn"
               onClick={() => setShowPrintAllSheet((prev) => !prev)}
-              className="px-3 py-1.5 rounded-[8px] bg-[#1A0C06] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer hover:bg-[#E8500C]"
+              className="min-h-[38px] px-3.5 rounded-[8px] bg-[#181615] hover:bg-[#292524] text-[#FAF8F5] text-[12px] font-semibold cursor-pointer whitespace-nowrap"
             >
               {showPrintAllSheet
-                ? '← Back to Single Plaque Designer'
-                : `View All ${tables.length} Tables Print Sheet`}
+                ? 'Back to Single Plaque'
+                : `View All ${tables.length} Tables Sheet`}
             </button>
           </div>
         </div>
@@ -270,32 +270,32 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
           <div className="flex flex-col gap-1">
             <label
               htmlFor="qr-base-url-input"
-              className="font-mono-code text-[10px] font-bold uppercase text-[#6C625C]"
+              className="text-[11px] font-semibold text-[#5C5852]"
             >
-              Live Deployment Domain / Guest Menu Base URL
+              Guest Menu Base URL
             </label>
             <input
               id="qr-base-url-input"
               type="url"
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
-              className="px-3 py-1.5 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[12px] font-mono-code text-[#1A0C06]"
+              className="h-9 px-3 rounded-[8px] bg-[#FFFFFF] border border-[#E4E0D8] text-[12px] font-mono-code text-[#181615]"
             />
           </div>
 
           <div className="flex flex-col gap-1">
             <label
               htmlFor="qr-subtitle-input"
-              className="font-mono-code text-[10px] font-bold uppercase text-[#6C625C]"
+              className="text-[11px] font-semibold text-[#5C5852]"
             >
-              Printed Plaque Callout Instruction
+              Plaque Scan Instruction
             </label>
             <input
               id="qr-subtitle-input"
               type="text"
               value={plaqueSubtitle}
               onChange={(e) => setPlaqueSubtitle(e.target.value)}
-              className="px-3 py-1.5 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[12px] text-[#1A0C06]"
+              className="h-9 px-3 rounded-[8px] bg-[#FFFFFF] border border-[#E4E0D8] text-[12px] text-[#181615]"
             />
           </div>
         </div>
@@ -304,50 +304,50 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
       {!showPrintAllSheet ? (
         /* Single Table Designer + Table Selector Grid */
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left: Live Printable Plaque Preview for Active Table */}
+          {/* Left: Live Printable Plaque Preview */}
           <div className="lg:col-span-5 flex flex-col items-center">
             <div
               data-testid="active-qr-plaque-card"
-              className="w-full max-w-[340px] rounded-[20px] bg-[#F7F2ED] border-4 border-[#140905] overflow-hidden flex flex-col items-center text-center"
+              className="w-full max-w-[330px] rounded-[16px] bg-[#FAF8F5] border-2 border-[#181615] overflow-hidden flex flex-col items-center text-center"
             >
-              <div className="w-full bg-[#140905] text-[#FBEFE6] py-3.5 px-4">
-                <div className="font-bold text-[16px] tracking-wide uppercase">
+              <div className="w-full bg-[#181615] text-[#FAF8F5] py-3.5 px-4">
+                <div className="font-display font-semibold text-[17px] tracking-wide uppercase">
                   {venueName}
                 </div>
-                <div className="font-mono-code text-[10px] text-[#C4F042] font-semibold mt-0.5">
-                  DIGITAL SWIPE MENU · LEVEL {serviceLevel}
+                <div className="font-mono-code text-[10px] text-[#FAF8F5]/75 mt-0.5">
+                  Digital Swipe Menu · Level {serviceLevel}
                 </div>
               </div>
 
-              <div className="mt-3 px-4 py-1 rounded-[8px] bg-[#E8500C] text-[#FFFFFF] font-mono-code text-[16px] font-bold">
+              <div className="mt-3 px-4 py-1 rounded-[8px] bg-[#D9480F] text-[#FFFFFF] font-mono-code text-[15px] font-bold">
                 TABLE {activeTable}
               </div>
 
-              <div className="my-3 p-3 rounded-[14px] bg-[#FFFFFF] border-2 border-[#140905] flex items-center justify-center">
+              <div className="my-3 p-3 rounded-[12px] bg-[#FFFFFF] border border-[#E4E0D8] flex items-center justify-center">
                 {activeQrDataUrl ? (
                   <img
                     src={activeQrDataUrl}
                     alt={`Scannable QR Code for Table ${activeTable}`}
                     data-testid={`qr-img-table-${activeTable}`}
-                    className="w-[190px] h-[190px] block"
+                    className="w-[184px] h-[184px] block"
                   />
                 ) : (
-                  <div className="w-[190px] h-[190px] flex items-center justify-center font-mono-code text-[11px] text-[#6C625C]">
+                  <div className="w-[184px] h-[184px] flex items-center justify-center font-mono-code text-[11px] text-[#5C5852]">
                     Generating QR...
                   </div>
                 )}
               </div>
 
               <div className="px-4 pb-4 flex flex-col gap-1">
-                <div className="font-bold text-[12px] text-[#140905] uppercase tracking-wider">
-                  SCAN WITH PHONE CAMERA TO ORDER
+                <div className="font-semibold text-[12px] text-[#181615] uppercase tracking-wider">
+                  Scan With Phone Camera
                 </div>
-                <div className="text-[11px] text-[#6C625C] leading-snug">
+                <div className="text-[11px] text-[#5C5852] leading-snug">
                   {plaqueSubtitle}
                 </div>
                 <div
                   data-testid="active-qr-encoded-url"
-                  className="font-mono-code text-[9px] text-[#140905]/70 break-all mt-1"
+                  className="font-mono-code text-[9px] text-[#5C5852] break-all mt-1"
                 >
                   {activeQrUrl}
                 </div>
@@ -357,21 +357,21 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
 
           {/* Right: Table Selector + Direct Export Actions */}
           <div className="lg:col-span-7 flex flex-col gap-4">
-            <div className="p-4 rounded-[16px] bg-[#F7F2ED] border border-[#E3D9D3] flex flex-col gap-3">
-              <div className="font-mono-code text-[11px] font-bold uppercase text-[#1A0C06]">
-                1. Select Table Number to Configure or Export
+            <div className="p-4 sm:p-5 rounded-[12px] bg-[#FAF8F5] border border-[#E4E0D8] flex flex-col gap-3">
+              <div className="text-[12px] font-semibold text-[#181615]">
+                1. Select Table Number
               </div>
-              <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
                 {tables.map((t) => (
                   <button
                     key={t.tableNumber}
                     type="button"
                     data-testid={`qr-select-table-${t.tableNumber}`}
                     onClick={() => onSelectTable(t.tableNumber)}
-                    className={`py-2 px-2.5 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer border transition-colors ${
+                    className={`min-h-[38px] px-2 rounded-[8px] font-mono-code text-[12px] font-semibold cursor-pointer border transition-colors whitespace-nowrap ${
                       activeTable === t.tableNumber
-                        ? 'bg-[#E8500C] text-[#FBEFE6] border-[#140905]'
-                        : 'bg-[#FFFFFF] text-[#1A0C06] border-[#E3D9D3] hover:border-[#1A0C06]'
+                        ? 'bg-[#D9480F] text-[#FFFFFF] border-[#D9480F]'
+                        : 'bg-[#FFFFFF] text-[#181615] border-[#E4E0D8] hover:border-[#181615]'
                     }`}
                   >
                     Table {t.tableNumber}
@@ -380,13 +380,13 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
               </div>
             </div>
 
-            <div className="p-4 rounded-[16px] bg-[#140905] text-[#FBEFE6] flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <span className="font-mono-code text-[11px] font-bold uppercase text-[#C4F042]">
-                  2. Export Table {activeTable} Plaque for Printing
+            <div className="p-4 sm:p-5 rounded-[12px] bg-[#FFFFFF] border border-[#E4E0D8] flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12px] font-semibold text-[#181615]">
+                  2. Export Table {activeTable} Plaque for Print
                 </span>
-                <span className="font-mono-code text-[11px] text-[#FBEFE6]/70">
-                  300 DPI High-Contrast ISO QR
+                <span className="font-mono-code text-[11px] text-[#5C5852]">
+                  300 DPI ISO QR
                 </span>
               </div>
 
@@ -395,38 +395,38 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
                   type="button"
                   data-testid="qr-download-png-btn"
                   onClick={() => handleDownloadPngPlaque(activeTable)}
-                  className="h-10 px-4 rounded-[10px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] font-mono-code text-[12px] font-bold cursor-pointer"
+                  className="min-h-[42px] px-4 rounded-[8px] bg-[#D9480F] hover:bg-[#B83B0A] text-[#FFFFFF] text-[12px] font-semibold cursor-pointer"
                 >
-                  ↓ Download PNG Plaque (1200×1600)
+                  Download PNG Plaque (1200×1600)
                 </button>
 
                 <button
                   type="button"
                   data-testid="qr-download-svg-btn"
                   onClick={() => handleDownloadSvgPlaque(activeTable)}
-                  className="h-10 px-4 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer"
+                  className="min-h-[42px] px-4 rounded-[8px] bg-[#181615] hover:bg-[#292524] text-[#FAF8F5] text-[12px] font-semibold cursor-pointer"
                 >
-                  ↓ Download Vector SVG Plaque
+                  Download Vector SVG Plaque
                 </button>
 
                 <button
                   type="button"
                   data-testid="qr-copy-url-btn"
                   onClick={() => handleCopyUrl(activeTable)}
-                  className="h-10 px-4 rounded-[10px] bg-[#2A180D] hover:bg-[#3A2214] text-[#FBEFE6] font-mono-code text-[12px] font-semibold cursor-pointer"
+                  className="min-h-[42px] px-4 rounded-[8px] bg-[#FAF8F5] hover:bg-[#EFECE6] border border-[#E4E0D8] text-[#181615] text-[12px] font-medium cursor-pointer"
                 >
                   {copiedTable === activeTable
-                    ? `✓ Copied Table ${activeTable} Link`
-                    : `Copy Table ${activeTable} Direct URL`}
+                    ? `Copied Table ${activeTable} Link`
+                    : `Copy Table ${activeTable} URL`}
                 </button>
 
                 <button
                   type="button"
                   data-testid="qr-test-scan-btn"
                   onClick={() => onTestTableMenu(activeTable)}
-                  className="h-10 px-4 rounded-[10px] bg-[#FFFFFF] text-[#140905] font-mono-code text-[12px] font-bold cursor-pointer"
+                  className="min-h-[42px] px-4 rounded-[8px] bg-[#ECFDF3] hover:bg-[#D1FAE5] border border-[#15803D]/30 text-[#15803D] text-[12px] font-semibold cursor-pointer"
                 >
-                  Test Scan Table {activeTable} Menu →
+                  Open Table {activeTable} Menu →
                 </button>
               </div>
             </div>
@@ -435,28 +435,26 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
       ) : (
         /* Print-Ready Sheet of All Tables */
         <div className="flex flex-col gap-4" data-testid="qr-all-tables-print-sheet">
-          <div className="p-3.5 rounded-[12px] bg-[#140905] text-[#FBEFE6] flex flex-wrap items-center justify-between gap-2">
-            <span className="font-mono-code text-[12px] text-[#C4F042] font-bold">
+          <div className="p-3.5 rounded-[12px] bg-[#FAF8F5] border border-[#E4E0D8] flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[12px] font-semibold text-[#181615]">
               Print Sheet Ready · All {tables.length} Tables ({venueName})
             </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className="px-4 py-1.5 rounded-[8px] bg-[#C4F042] text-[#140905] font-mono-code text-[12px] font-bold cursor-pointer"
-              >
-                Print All {tables.length} Table Plaques
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="min-h-[38px] px-4 rounded-[8px] bg-[#D9480F] hover:bg-[#B83B0A] text-[#FFFFFF] text-[12px] font-semibold cursor-pointer"
+            >
+              Print All {tables.length} Table Plaques
+            </button>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
             {tables.map((t) => (
               <div
                 key={t.tableNumber}
-                className="p-3 rounded-[16px] bg-[#F7F2ED] border-2 border-[#140905] flex flex-col items-center text-center gap-2"
+                className="p-3 rounded-[12px] bg-[#FFFFFF] border border-[#E4E0D8] flex flex-col items-center text-center gap-2"
               >
-                <div className="w-full py-1.5 rounded-[8px] bg-[#140905] text-[#FBEFE6] font-mono-code text-[11px] font-bold uppercase">
+                <div className="w-full py-1.5 rounded-[6px] bg-[#181615] text-[#FAF8F5] font-mono-code text-[11px] font-semibold uppercase">
                   {venueName} · TABLE {t.tableNumber}
                 </div>
 
@@ -464,7 +462,7 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
                   <img
                     src={qrDataUrls[t.tableNumber]}
                     alt={`Table ${t.tableNumber} QR`}
-                    className="w-[140px] h-[140px] bg-[#FFFFFF] p-1.5 rounded-[10px] border border-[#140905]"
+                    className="w-[140px] h-[140px] bg-[#FFFFFF] p-1.5 rounded-[8px] border border-[#E4E0D8]"
                   />
                 ) : (
                   <div className="w-[140px] h-[140px] flex items-center justify-center text-[11px]">
@@ -472,7 +470,7 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
                   </div>
                 )}
 
-                <div className="font-mono-code text-[10px] font-bold text-[#C03E0A]">
+                <div className="font-mono-code text-[10px] font-semibold text-[#D9480F]">
                   SCAN TO ORDER · TABLE {t.tableNumber}
                 </div>
 
@@ -480,16 +478,16 @@ export const TableQrGenerator: React.FC<TableQrGeneratorProps> = ({
                   <button
                     type="button"
                     onClick={() => handleDownloadPngPlaque(t.tableNumber)}
-                    className="flex-1 py-1 rounded-[6px] bg-[#140905] text-[#C4F042] font-mono-code text-[10px] font-bold cursor-pointer"
+                    className="flex-1 min-h-[32px] rounded-[6px] bg-[#D9480F] text-[#FFFFFF] font-mono-code text-[10px] font-semibold cursor-pointer"
                   >
-                    ↓ PNG
+                    PNG
                   </button>
                   <button
                     type="button"
                     onClick={() => handleDownloadSvgPlaque(t.tableNumber)}
-                    className="flex-1 py-1 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold cursor-pointer"
+                    className="flex-1 min-h-[32px] rounded-[6px] bg-[#181615] text-[#FAF8F5] font-mono-code text-[10px] font-semibold cursor-pointer"
                   >
-                    ↓ SVG
+                    SVG
                   </button>
                 </div>
               </div>

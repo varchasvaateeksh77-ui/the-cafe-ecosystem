@@ -1,41 +1,25 @@
 :root {
-  --page:        #F7F2ED;
-  --page-alt:    #F4EFEA;
-  --card:        #FFFFFF;
-  --ink:         #1A0C06;
-  --body:        #6C625C;
-  --faint:       #B6AEA7;
-  --accent:      #E8500C;
-  --accent-text: #C03E0A;
-  --chip:        #F3ECE5;
-  --peach:       #FFEEE3;
-  --dark:        #140905;
-  --line:        #E3D9D3;
-  --on-dark:     #FBEFE6;
+  --page:          #F7F6F2;
+  --page-alt:      #EFECE6;
+  --card:          #FFFFFF;
+  --ink:           #181615;
+  --body:          #5C5852;
+  --faint:         #9C968E;
+  --accent:        #D9480F;
+  --accent-hover:  #B83B0A;
+  --accent-wash:   #FFF1EB;
+  --ready:         #15803D;
+  --ready-wash:    #ECFDF3;
+  --amber:         #B45309;
+  --amber-wash:    #FEF3C7;
+  --dark:          #181615;
+  --on-dark:       #FAF8F5;
+  --line:          #E4E0D8;
 
-  --hero-gradient: linear-gradient(
-    180deg,
-    #250F07 0%,
-    #371307 15%,
-    #441807 23%,
-    #5C1C07 31%,
-    #741F05 38%,
-    #892808 46%,
-    #B63B0C 54%,
-    #E15010 61%,
-    #FD671E 69%,
-    #FF8741 77%,
-    #FFB582 85%,
-    #FCD7BE 92%,
-    #F4EDE6 100%
-  );
+  --font-display: "Fraunces", Georgia, serif;
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  --font-sans: "Google Sans Flex", "Figtree", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: "Google Sans Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-
-  --radius-card: 24px;
-  --radius-nav: 20px;
-  --radius-btn: 12px;
-  --radius-chip: 12px;
-  --radius-pill: 9999px;
+  --radius-card: 16px;
+  --radius-btn: 10px;
 }

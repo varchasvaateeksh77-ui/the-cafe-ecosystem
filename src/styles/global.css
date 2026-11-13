@@ -21,8 +21,17 @@ body {
   overflow-x: hidden;
 }
 
+.font-display {
+  font-family: var(--font-display);
+}
+
 code, pre, .font-mono-code {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 :focus-visible {
@@ -42,17 +51,15 @@ code, pre, .font-mono-code {
   border: 2px solid var(--accent);
   font-weight: 600;
   text-decoration: none;
-  transition: top 150ms ease;
 }
 
 .skip-link:focus {
   top: 14px;
 }
 
-.hero-surface {
-  background: var(--hero-gradient);
-}
-
-.tabular-nums {
-  font-variant-numeric: tabular-nums;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
