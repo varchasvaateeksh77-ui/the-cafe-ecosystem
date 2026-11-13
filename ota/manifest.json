@@ -1,6 +1,6 @@
 {
-  "otaVersion": 241,
+  "otaVersion": 242,
   "releaseChannel": "production-live",
-  "updatedAt": "2026-11-12T13:55:00Z",
-  "notes": "Live Over-The-Air (OTA) Bundle v241 — Redesigned UI & Unified Waiter Queue"
+  "updatedAt": "2026-11-13T09:45:00Z",
+  "notes": "Live Over-The-Air (OTA) Bundle v242 — Single-Chunk OTA & Role-Locked Native Loader"
 }

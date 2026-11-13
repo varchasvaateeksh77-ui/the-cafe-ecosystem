@@ -1,4 +1,4 @@
-name: Build Android APKs (Waiter, Kitchen, Owner Admin)
+name: Build Android APKs & Publish Live OTA Bundle (Waiter, Kitchen, Owner Admin)
 
 on:
   push:
@@ -34,10 +34,28 @@ jobs:
           npm install --legacy-peer-deps
           npm install --no-save --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 @capacitor/local-notifications@^6.0.0 @capacitor/haptics@^6.0.0
 
-      - name: Build 1 - Waiter Phone APK (com.buildbros.waiter)
+      - name: Build Universal OTA Cloud Bundle (ota/bundle.js, ota/bundle.css, ota/manifest.json)
         run: |
-          mkdir -p apks
-          VITE_DEFAULT_APK=waiter npm run build
+          mkdir -p ota apks
+          npm run build
+          JS_FILE=$(ls dist/assets/index-*.js | head -n 1)
+          CSS_FILE=$(ls dist/assets/index-*.css | head -n 1)
+          cp "$JS_FILE" ota/bundle.js
+          cp "$CSS_FILE" ota/bundle.css
+          OTA_VER=$(date +%s)
+          echo "OTA_VER=$OTA_VER" >> $GITHUB_ENV
+          cat > ota/manifest.json << EOF
+          {
+            "otaVersion": ${OTA_VER},
+            "releaseChannel": "production-live",
+            "updatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "notes": "Automated Over-The-Air (OTA) Live Bundle Push"
+          }
+          EOF
+
+      - name: Build 1 - Waiter Phone APK (com.buildbros.waiter) with Live OTA Loader
+        run: |
+          VITE_DEFAULT_APK=waiter VITE_OTA_VERSION=${{ env.OTA_VER }} npm run build
           cat > capacitor.config.json << 'EOF'
           {
             "appId": "com.buildbros.waiter",
@@ -55,13 +73,13 @@ jobs:
           rm -rf android
           npx cap add android
           npx cap sync android
-          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application android:usesCleartextTraffic="true"|' android/app/src/main/AndroidManifest.xml
           cd android && chmod +x gradlew && ./gradlew assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-waiter.apk
 
-      - name: Build 2 - Kitchen & Reception KDS APK (com.buildbros.kitchen)
+      - name: Build 2 - Kitchen & Reception KDS APK (com.buildbros.kitchen) with Live OTA Loader
         run: |
-          VITE_DEFAULT_APK=kitchen npm run build
+          VITE_DEFAULT_APK=kitchen VITE_OTA_VERSION=${{ env.OTA_VER }} npm run build
           cat > capacitor.config.json << 'EOF'
           {
             "appId": "com.buildbros.kitchen",
@@ -79,13 +97,13 @@ jobs:
           rm -rf android
           npx cap add android
           npx cap sync android
-          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application android:usesCleartextTraffic="true"|' android/app/src/main/AndroidManifest.xml
           cd android && chmod +x gradlew && ./gradlew assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-kitchen.apk
 
-      - name: Build 3 - Owner Admin Phone APK (com.buildbros.admin)
+      - name: Build 3 - Owner Admin Phone APK (com.buildbros.admin) with Live OTA Loader
         run: |
-          VITE_DEFAULT_APK=admin npm run build
+          VITE_DEFAULT_APK=admin VITE_OTA_VERSION=${{ env.OTA_VER }} npm run build
           cat > capacitor.config.json << 'EOF'
           {
             "appId": "com.buildbros.admin",
@@ -103,17 +121,17 @@ jobs:
           rm -rf android
           npx cap add android
           npx cap sync android
-          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application android:usesCleartextTraffic="true"|' android/app/src/main/AndroidManifest.xml
           cd android && chmod +x gradlew && ./gradlew assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk ../apks/buildbros-admin.apk
           rm -rf android capacitor.config.json
 
-      - name: Commit Compiled .apk Files Directly into /apks in Repo
+      - name: Commit Compiled .apk Files and Live OTA Bundles Directly into Repo
         run: |
           git config user.name "varchasvaateeksh77-ui"
           git config user.email "varchasvaateeksh77@gmail.com"
-          git add -f apks/buildbros-waiter.apk apks/buildbros-kitchen.apk apks/buildbros-admin.apk
-          git commit -m "chore(apk): update compiled Android .apk files with live cloud sync & native notifications [skip ci]" || true
+          git add -f apks/buildbros-waiter.apk apks/buildbros-kitchen.apk apks/buildbros-admin.apk ota/bundle.js ota/bundle.css ota/manifest.json
+          git commit -m "chore(ota+apk): publish live OTA bundle & compiled Android .apk files [skip ci]" || true
           git push origin HEAD:main || true
 
       - name: Upload 3 Android APKs as Workflow Artifacts
@@ -134,8 +152,8 @@ jobs:
             apks/buildbros-waiter.apk \
             apks/buildbros-kitchen.apk \
             apks/buildbros-admin.apk \
-            --title "The Cafe Ecosystem — Direct Android Phone APKs (v1.0.0)" \
-            --notes "Direct installable Android APKs with live cross-phone Supabase cloud sync and native Android status-bar notifications:
+            --title "The Cafe Ecosystem — OTA-Enabled Android Phone APKs (v2.4)" \
+            --notes "Direct installable Android APKs with Over-The-Air (OTA) live hot-updates, cross-phone Supabase Realtime + Cloud Sync, and native Android status-bar notifications:
             - **Waiter Phone APK** (\`buildbros-waiter.apk\` · \`com.buildbros.waiter\`)
             - **Kitchen & Reception KDS APK** (\`buildbros-kitchen.apk\` · \`com.buildbros.kitchen\`)
             - **Owner / Admin Phone APK** (\`buildbros-admin.apk\` · \`com.buildbros.admin\`)" \

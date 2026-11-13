@@ -8,11 +8,22 @@ export const SUPABASE_REST_ENDPOINT =
   env.VITE_SUPABASE_REST_URL || 'https://vidryxsmxjvtcgbvrfix.supabase.co/rest/v1/';
 export const SUPABASE_PUBLISHABLE_KEY =
   env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Ypt97zDNyK14_Jv5LRvbeA_rcDstDlV';
-const SUPABASE_SYNC_KEY =
-  env.VITE_SUPABASE_SYNC_KEY || ['sb_secret', '5IpiX9foAL_sftvd93Wf7w_jTjabujh'].join('_');
 export const FCM_VAPID_PUBLIC_KEY =
   env.VITE_FCM_VAPID_KEY ||
   'BDHHUeG53kBo0731JU9vEMkaqebz7x0Set-km70k02gdHe5pW1lxPeb5VXvducVTV4yQiBz-Hkt7Ds1zCM1IyGo';
+
+export const GH_CLOUD_REPO = 'varchasvaateeksh77-ui/the-cafe-ecosystem';
+export function getCloudSyncToken(): string {
+  if (env.VITE_GH_SYNC_TOKEN) return env.VITE_GH_SYNC_TOKEN;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem('bb_owner_sync_token') || '';
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return '';
+}
 
 export const supabase = createClient(SUPABASE_PROJECT_URL, SUPABASE_PUBLISHABLE_KEY, {
   realtime: {
@@ -20,12 +31,8 @@ export const supabase = createClient(SUPABASE_PROJECT_URL, SUPABASE_PUBLISHABLE_
   },
 });
 
-const supabaseCloudStorage = createClient(SUPABASE_PROJECT_URL, SUPABASE_SYNC_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
-
-const SYNC_BUCKET = 'cafe-ecosystem-sync';
-const SYNC_OBJECT_PATH = 'state.json';
+export const SYNC_BUCKET = 'cafe-ecosystem-sync';
+const LOCAL_STORAGE_KEY = 'build_bros_cafe_ecosystem_state_v3';
 
 export type ServiceLevel = 1 | 2 | 3;
 export type FloorTableStatus =
@@ -75,6 +82,7 @@ export interface KitchenOrder {
   status: 'incoming' | 'new' | 'cooking' | 'ready' | 'served';
   notes: string;
   createdAt: string;
+  checkedItemIds?: string[];
 }
 
 export interface FloorTable {
@@ -109,8 +117,16 @@ export interface CrossDeviceAlert {
   createdAtMs: number;
 }
 
+export interface OtaManifest {
+  otaVersion: number;
+  releaseChannel: string;
+  updatedAt: string;
+  notes: string;
+}
+
 export interface CafeEcosystemState {
   stateVersion: number;
+  otaVersion: number;
   updatedAtMs: number;
   venueName: string;
   venueSlug: string;
@@ -141,8 +157,7 @@ export const INITIAL_DISHES: DishItem[] = [
     plateColor: '#C88A5A',
     isAvailable: true,
     prepTime: '4 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1572442388796-11668a67e53d?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/flat-white.jpg',
   },
   {
     id: 'd-2',
@@ -155,8 +170,7 @@ export const INITIAL_DISHES: DishItem[] = [
     plateColor: '#D97B38',
     isAvailable: true,
     prepTime: '3 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1517701550927-30cf4ba1dba5?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/yuzu-cold-brew.jpg',
   },
   {
     id: 'd-3',
@@ -169,8 +183,7 @@ export const INITIAL_DISHES: DishItem[] = [
     plateColor: '#8C3F19',
     isAvailable: true,
     prepTime: '12 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/truffle-burger.jpg',
   },
   {
     id: 'd-4',
@@ -183,8 +196,7 @@ export const INITIAL_DISHES: DishItem[] = [
     plateColor: '#D64924',
     isAvailable: true,
     prepTime: '8 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/sourdough-toast.jpg',
   },
   {
     id: 'd-5',
@@ -197,22 +209,20 @@ export const INITIAL_DISHES: DishItem[] = [
     plateColor: '#E2B46D',
     isAvailable: true,
     prepTime: '3 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1533134242443-d4fd215305ad?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/basque-cheesecake.jpg',
   },
   {
     id: 'd-6',
-    name: '70% Dark Chocolate Sea Salt Brownie',
+    name: '70% Dark Chocolate Sea Salt Tart',
     description:
-      'Warm Valrhona dark chocolate fudge brownie finished with flaky Maldon sea salt.',
+      'Warm Valrhona dark chocolate ganache finished with flaky Maldon sea salt.',
     price: 260,
     category: 'Bakery',
     dietary: 'Veg',
     plateColor: '#4A2511',
     isAvailable: true,
     prepTime: '3 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/basque-cheesecake.jpg',
   },
   {
     id: 'd-7',
@@ -225,50 +235,46 @@ export const INITIAL_DISHES: DishItem[] = [
     plateColor: '#A66A38',
     isAvailable: true,
     prepTime: '4 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/flat-white.jpg',
   },
   {
     id: 'd-8',
-    name: 'Kyoto Uji Matcha Cloud Latte',
+    name: 'Sparkling Blood Orange Espresso',
     description:
-      'Ceremonial grade first-harvest matcha whisked over oat milk and cold vanilla foam.',
+      'Chilled double espresso layered over Sicilian blood orange tonic and thyme.',
     price: 310,
     category: 'Cold Bar',
     dietary: 'Veg',
     plateColor: '#5E8C4A',
     isAvailable: true,
     prepTime: '5 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1536256263959-770b48d82b0a?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/yuzu-cold-brew.jpg',
   },
   {
     id: 'd-9',
-    name: 'Charred Harissa Chicken Skillet',
+    name: 'Charred Harissa Brioche Melt',
     description:
-      'Wood-roasted harissa chicken, herbed couscous, pickled shallots & tahini labneh.',
+      'Wood-roasted harissa glaze, aged provolone, pickled shallots & tahini aioli.',
     price: 540,
     category: 'Kitchen Mains',
     dietary: 'Non-Veg',
     plateColor: '#B84A24',
     isAvailable: true,
     prepTime: '14 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/truffle-burger.jpg',
   },
   {
     id: 'd-10',
-    name: 'Truffle & Wild Mushroom Folded Eggs',
+    name: 'Truffle & Wild Mushroom Tartine',
     description:
-      'Soft-folded organic eggs, roasted cremini mushrooms, chives & warm sourdough.',
+      'Roasted cremini mushrooms, whipped herb ricotta, chives & warm country sourdough.',
     price: 390,
     category: 'All-Day Plates',
     dietary: 'Chef Special',
     plateColor: '#C9963B',
     isAvailable: true,
     prepTime: '9 mins',
-    imageUrl:
-      'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=900&q=80',
+    imageUrl: '/dishes/sourdough-toast.jpg',
   },
 ];
 
@@ -307,6 +313,7 @@ export function createInitialCafeState(): CafeEcosystemState {
 
   return {
     stateVersion: 1,
+    otaVersion: 240,
     updatedAtMs: Date.now(),
     venueName: 'Roast & Co. Flagship',
     venueSlug: 'roast-and-co',
@@ -337,6 +344,7 @@ export function createInitialCafeState(): CafeEcosystemState {
         status: 'incoming',
         notes: 'Extra hot flat white',
         createdAt: now,
+        checkedItemIds: [],
       },
       {
         id: 'ord-411',
@@ -351,6 +359,7 @@ export function createInitialCafeState(): CafeEcosystemState {
         status: 'ready',
         notes: '',
         createdAt: now,
+        checkedItemIds: ['d-2', 'd-5'],
       },
     ],
     tables: INITIAL_TABLES.map((t) => ({ ...t })),
@@ -379,39 +388,224 @@ export function createInitialCafeState(): CafeEcosystemState {
   };
 }
 
+let lastGithubSha: string | null = null;
+let isSavingToCloud = false;
+let inMemoryStateCache: CafeEcosystemState | null = null;
+
+function encodeBase64Utf8(str: string): string {
+  if (typeof btoa === 'function') {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+  return '';
+}
+
 export async function saveCloudEcosystemState(
   state: CafeEcosystemState
 ): Promise<void> {
+  const payloadObj: CafeEcosystemState = {
+    ...state,
+    updatedAtMs: Date.now(),
+  };
+  inMemoryStateCache = normalizeDishes(payloadObj);
+  const payload = JSON.stringify(payloadObj);
+
+  // 1. Instant local persistence
   try {
-    const payload = JSON.stringify({
-      ...state,
-      updatedAtMs: Date.now(),
-    });
-    await supabaseCloudStorage.storage
-      .from(SYNC_BUCKET)
-      .upload(SYNC_OBJECT_PATH, payload, {
-        contentType: 'application/json',
-        upsert: true,
-        cacheControl: '0',
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(LOCAL_STORAGE_KEY, payload);
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+
+  // 2. Optional GitHub Contents API cloud snapshot if device has an owner sync token configured
+  const token = getCloudSyncToken();
+  if (!token || isSavingToCloud) return;
+  isSavingToCloud = true;
+  try {
+    const apiUrl = `https://api.github.com/repos/${GH_CLOUD_REPO}/contents/cloud-sync/state.json`;
+    if (!lastGithubSha) {
+      const metaRes = await fetch(apiUrl, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+        },
+        cache: 'no-store',
       });
+      if (metaRes.ok) {
+        const meta = (await metaRes.json()) as { sha?: string };
+        if (meta.sha) lastGithubSha = meta.sha;
+      }
+    }
+
+    const putRes = await fetch(apiUrl, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: `sync: state v${payloadObj.stateVersion} [skip ci]`,
+        content: encodeBase64Utf8(payload),
+        ...(lastGithubSha ? { sha: lastGithubSha } : {}),
+      }),
+    });
+
+    if (putRes.ok) {
+      const putData = (await putRes.json()) as { content?: { sha?: string } };
+      if (putData?.content?.sha) {
+        lastGithubSha = putData.content.sha;
+      }
+    } else if (putRes.status === 409 || putRes.status === 422) {
+      lastGithubSha = null;
+    }
   } catch {
     // Ignore transient network errors
+  } finally {
+    isSavingToCloud = false;
   }
 }
 
-export async function fetchCloudEcosystemState(): Promise<CafeEcosystemState | null> {
+function normalizeDishes(parsed: CafeEcosystemState): CafeEcosystemState {
+  const dishImageMap = new Map(INITIAL_DISHES.map((d) => [d.id, d.imageUrl]));
+  return {
+    ...parsed,
+    otaVersion: parsed.otaVersion || 240,
+    dishes: parsed.dishes.map((d) => ({
+      ...d,
+      imageUrl: dishImageMap.get(d.id) || d.imageUrl,
+    })),
+  };
+}
+
+export function loadLocalEcosystemState(): CafeEcosystemState | null {
   try {
-    const url = `${SUPABASE_PROJECT_URL}/storage/v1/object/public/${SYNC_BUCKET}/${SYNC_OBJECT_PATH}?t=${Date.now()}`;
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) return null;
-    const parsed = (await res.json()) as CafeEcosystemState;
-    if (!parsed || !Array.isArray(parsed.orders) || !Array.isArray(parsed.dishes)) {
-      return null;
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as CafeEcosystemState;
+        if (parsed && Array.isArray(parsed.orders) && Array.isArray(parsed.dishes)) {
+          return normalizeDishes(parsed);
+        }
+      }
     }
-    return parsed;
+  } catch {
+    // Ignore local storage errors
+  }
+  return null;
+}
+
+export async function fetchCloudEcosystemState(): Promise<CafeEcosystemState | null> {
+  let bestState: CafeEcosystemState | null = inMemoryStateCache || loadLocalEcosystemState();
+  const token = getCloudSyncToken();
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.raw+json',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  // Fetch uncached live cloud baseline from public GitHub repo (no secret needed to read)
+  try {
+    const apiUrl = `https://api.github.com/repos/${GH_CLOUD_REPO}/contents/cloud-sync/state.json?t=${Date.now()}`;
+    let res = await fetch(apiUrl, { headers, cache: 'no-store' });
+    if (!res.ok) {
+      res = await fetch(
+        `https://raw.githubusercontent.com/${GH_CLOUD_REPO}/main/cloud-sync/state.json?t=${Date.now()}`,
+        { cache: 'no-store' }
+      );
+    }
+    if (res.ok) {
+      const parsed = (await res.json()) as CafeEcosystemState;
+      if (parsed && Array.isArray(parsed.orders) && Array.isArray(parsed.dishes)) {
+        const normalized = normalizeDishes(parsed);
+        if (!bestState || (normalized.stateVersion || 0) >= (bestState.stateVersion || 0)) {
+          bestState = normalized;
+          inMemoryStateCache = normalized;
+        }
+      }
+    }
+  } catch {
+    // Ignore network glitch
+  }
+
+  return bestState;
+}
+
+export async function fetchOtaManifest(): Promise<OtaManifest | null> {
+  const token = getCloudSyncToken();
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github.raw+json',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const apiUrl = `https://api.github.com/repos/${GH_CLOUD_REPO}/contents/ota/manifest.json?t=${Date.now()}`;
+    let res = await fetch(apiUrl, { headers, cache: 'no-store' });
+    if (!res.ok) {
+      res = await fetch(
+        `https://raw.githubusercontent.com/${GH_CLOUD_REPO}/main/ota/manifest.json?t=${Date.now()}`,
+        { cache: 'no-store' }
+      );
+    }
+    if (!res.ok) return null;
+    return (await res.json()) as OtaManifest;
   } catch {
     return null;
   }
+}
+
+export async function pushOtaManifestUpdate(
+  nextOtaVersion: number,
+  notes: string
+): Promise<OtaManifest> {
+  const manifest: OtaManifest = {
+    otaVersion: nextOtaVersion,
+    releaseChannel: 'production-live',
+    updatedAt: new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }),
+    notes,
+  };
+  const token = getCloudSyncToken();
+  if (!token) return manifest;
+  try {
+    const apiUrl = `https://api.github.com/repos/${GH_CLOUD_REPO}/contents/ota/manifest.json`;
+    let sha: string | undefined;
+    const metaRes = await fetch(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+      },
+      cache: 'no-store',
+    });
+    if (metaRes.ok) {
+      const meta = (await metaRes.json()) as { sha?: string };
+      sha = meta.sha;
+    }
+    await fetch(apiUrl, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: `ota: publish live update v${nextOtaVersion} [skip ci]`,
+        content: encodeBase64Utf8(JSON.stringify(manifest, null, 2)),
+        ...(sha ? { sha } : {}),
+      }),
+    });
+  } catch {
+    // Ignore transient network error
+  }
+  return manifest;
 }
 
 export function applyAdminDishPatch(

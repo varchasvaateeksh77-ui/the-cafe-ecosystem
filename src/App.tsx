@@ -10,10 +10,14 @@ import {
   calculateCartTotal,
   createInitialCafeState,
   fetchCloudEcosystemState,
+  fetchOtaManifest,
+  loadLocalEcosystemState,
+  pushOtaManifestUpdate,
   saveCloudEcosystemState,
   supabase,
 } from './lib/ecosystemStore';
 import { TableQrGenerator } from './components/TableQrGenerator';
+import { TopDownFloorMap } from './components/TopDownFloorMap';
 import { ThemeCataloguePage } from './catalogue/ThemeCataloguePage';
 import { LiveThemeInstance } from './catalogue/LiveThemeInstance';
 import { ThemeId } from './catalogue/themeCatalogData';
@@ -32,8 +36,32 @@ type ActiveWorkspaceView =
   | 'theme-catalogue'
   | 'live-theme';
 
-const DEDICATED_APK_ROLE = (import.meta as unknown as { env?: Record<string, string> })?.env
-  ?.VITE_DEFAULT_APK as 'waiter' | 'kitchen' | 'admin' | undefined;
+function resolveDedicatedApkRole(): 'waiter' | 'kitchen' | 'admin' | undefined {
+  if (typeof window !== 'undefined') {
+    const winRole = (
+      window as unknown as { __BUILD_BROS_APK_ROLE__?: string }
+    ).__BUILD_BROS_APK_ROLE__;
+    if (winRole === 'waiter' || winRole === 'kitchen' || winRole === 'admin') {
+      return winRole;
+    }
+    try {
+      const storedRole = window.localStorage?.getItem('bb_apk_role');
+      if (storedRole === 'waiter' || storedRole === 'kitchen' || storedRole === 'admin') {
+        return storedRole;
+      }
+    } catch {
+      // Ignore storage error
+    }
+  }
+  const envRole = (import.meta as unknown as { env?: Record<string, string> })?.env
+    ?.VITE_DEFAULT_APK;
+  if (envRole === 'waiter' || envRole === 'kitchen' || envRole === 'admin') {
+    return envRole;
+  }
+  return undefined;
+}
+
+const DEDICATED_APK_ROLE = resolveDedicatedApkRole();
 
 function getInitialViewFromUrl(): ActiveWorkspaceView {
   if (DEDICATED_APK_ROLE === 'waiter') return 'waiter-apk';
@@ -52,7 +80,7 @@ function getInitialViewFromUrl(): ActiveWorkspaceView {
 }
 
 function createHydratedInitialState(): CafeEcosystemState {
-  const base = createInitialCafeState();
+  const base = loadLocalEcosystemState() || createInitialCafeState();
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
     const tableParam = parseInt(params.get('table') || '', 10);
@@ -67,12 +95,45 @@ function createHydratedInitialState(): CafeEcosystemState {
   return base;
 }
 
+const DishPhotoWithFallback: React.FC<{
+  dish: DishItem;
+  className?: string;
+}> = ({ dish, className = 'w-full h-full object-cover' }) => {
+  const [imgFailed, setImgFailed] = useState(false);
+
+  if (!dish.imageUrl || imgFailed) {
+    return (
+      <div
+        className={` flex flex-col items-center justify-center p-4 text-center ${className}`}
+        style={{ backgroundColor: dish.plateColor || '#8C3F19' }}
+      >
+        <span className="font-mono-code text-[11px] text-[#FBEFE6]/80 uppercase tracking-widest">
+          {dish.category}
+        </span>
+        <span className="font-bold text-[16px] text-[#FFFFFF] mt-1">{dish.name}</span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={dish.imageUrl}
+      alt={dish.name}
+      referrerPolicy="no-referrer"
+      draggable={false}
+      onError={() => setImgFailed(true)}
+      className={className}
+    />
+  );
+};
+
 export default function App() {
   const [state, setState] = useState<CafeEcosystemState>(() => createHydratedInitialState());
   const [view, setView] = useState<ActiveWorkspaceView>(() => getInitialViewFromUrl());
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [guestStep, setGuestStep] = useState<'deck' | 'cart'>('deck');
   const [guestDisplayMode, setGuestDisplayMode] = useState<'swipe' | 'list'>('swipe');
+  const [guestOrderNotes, setGuestOrderNotes] = useState<string>('');
 
   // Swipe Deck State for Surface 1 (Guest Web Menu)
   const [deckIndex, setDeckIndex] = useState<number>(0);
@@ -89,11 +150,15 @@ export default function App() {
   } | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
-  const [waiterTab, setWaiterTab] = useState<'pickup' | 'calls' | 'floor'>('pickup');
-  const [adminTab, setAdminTab] = useState<'menu' | 'floor' | 'qr'>('menu');
+  // Staff & Admin Navigation Tabs
+  // Waiter defaults to 'queue' (unified Priority Queue showing both Pass Pickup + Table Calls)
+  const [waiterTab, setWaiterTab] = useState<'queue' | 'pickup' | 'calls' | 'floor'>('queue');
+  const [adminTab, setAdminTab] = useState<'floor' | 'menu' | 'qr' | 'ota'>('menu');
   const [editingDishId, setEditingDishId] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState<string>('');
   const [liveToast, setLiveToast] = useState<{ title: string; body: string } | null>(null);
+  const [isPushingOta, setIsPushingOta] = useState<boolean>(false);
+
   const [activeThemeConfig, setActiveThemeConfig] = useState<{
     themeId: ThemeId;
     customBrandName: string;
@@ -108,27 +173,30 @@ export default function App() {
 
   const { soundEnabled, toggleSound } = useSoundEffects();
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const stateRef = useRef<CafeEcosystemState>(state);
   const stateVersionRef = useRef<number>(state.stateVersion || 1);
+  const otaVersionRef = useRef<number>(state.otaVersion || 240);
   const lastProcessedAlertIdRef = useRef<string | null>(state.lastAlert?.id || null);
 
   useEffect(() => {
+    stateRef.current = state;
     stateVersionRef.current = state.stateVersion || 1;
-  }, [state.stateVersion]);
+    otaVersionRef.current = state.otaVersion || 240;
+  }, [state]);
 
-  // Initialize Native Android Notification Channel & Permissions on Mount
   useEffect(() => {
     initNativeNotifications();
   }, []);
 
-  // Process Incoming Cross-Device State & Trigger Native Notification / Auto-Tab Switch
   const applyIncomingRemoteState = useCallback(
     (incoming: CafeEcosystemState) => {
       if (!incoming || !Array.isArray(incoming.orders)) return;
       if ((incoming.stateVersion || 0) <= stateVersionRef.current) return;
 
+      const prevOta = otaVersionRef.current;
       stateVersionRef.current = incoming.stateVersion;
+      otaVersionRef.current = incoming.otaVersion || prevOta;
 
-      // Preserve URL-bound activeTable on guest phones while syncing shared orders/calls/menu
       setState((prev) => ({
         ...incoming,
         activeTable: prev.activeTable,
@@ -136,7 +204,16 @@ export default function App() {
         realtimeConnected: true,
       }));
 
-      // Check if there is a new alert that hasn't been notified yet
+      // If an OTA update was pushed, notify and apply live state immediately
+      if ((incoming.otaVersion || 0) > prevOta) {
+        soundFX.play('served');
+        setLiveToast({
+          title: `Live OTA Update v${incoming.otaVersion} Applied`,
+          body: 'Updated over the air via Supabase & Cloud Sync — no APK download required.',
+        });
+        window.setTimeout(() => setLiveToast(null), 4500);
+      }
+
       const alert = incoming.lastAlert;
       if (alert && alert.id !== lastProcessedAlertIdRef.current) {
         lastProcessedAlertIdRef.current = alert.id;
@@ -154,10 +231,10 @@ export default function App() {
         if (isForWaiter || isForKitchen || isForGuest) {
           if (alert.title.includes('READY')) {
             soundFX.play('kitchenReady');
-            setWaiterTab('pickup');
+            setWaiterTab((prev) => (prev === 'floor' ? 'queue' : prev));
           } else if (alert.title.includes('Waiter')) {
             soundFX.play('waiterCall');
-            setWaiterTab('calls');
+            setWaiterTab((prev) => (prev === 'floor' ? 'queue' : prev));
           } else {
             soundFX.play('ticketSent');
           }
@@ -171,18 +248,41 @@ export default function App() {
     [view]
   );
 
-  // Subscribe to Supabase Realtime Broadcast + Persistent Cloud State Sync
+  // Subscribe to Supabase Realtime Broadcast + Peer Catch-Up + Public Cloud Baseline
   useEffect(() => {
     let active = true;
 
-    // 1. Initial pull from Supabase Cloud Storage
+    const checkRemoteOta = () => {
+      fetchOtaManifest().then((manifest) => {
+        if (!active || !manifest) return;
+        const activeOtaVer = Math.max(
+          otaVersionRef.current,
+          (window as unknown as { __BB_ACTIVE_OTA_VER__?: number }).__BB_ACTIVE_OTA_VER__ || 0
+        );
+        if (manifest.otaVersion > activeOtaVer) {
+          otaVersionRef.current = manifest.otaVersion;
+          setState((prev) => ({ ...prev, otaVersion: manifest.otaVersion }));
+          const isNative = Boolean(
+            (
+              window as unknown as {
+                Capacitor?: { isNativePlatform?: () => boolean };
+              }
+            ).Capacitor?.isNativePlatform?.()
+          );
+          if (isNative) {
+            window.setTimeout(() => window.location.reload(), 600);
+          }
+        }
+      });
+    };
+
     fetchCloudEcosystemState().then((remote) => {
       if (active && remote) {
         applyIncomingRemoteState(remote);
       }
     });
+    checkRemoteOta();
 
-    // 2. Realtime WebSocket Broadcast Channel (<150ms)
     const channel = supabase.channel('cafe-ecosystem-realtime', {
       config: { broadcast: { self: false } },
     });
@@ -191,6 +291,16 @@ export default function App() {
       .on('broadcast', { event: 'state_sync' }, (payload) => {
         if (payload?.payload) {
           applyIncomingRemoteState(payload.payload as CafeEcosystemState);
+        }
+      })
+      .on('broadcast', { event: 'sync_request' }, (payload) => {
+        const peerVer = (payload?.payload as { fromVersion?: number })?.fromVersion || 0;
+        if ((stateRef.current.stateVersion || 1) > peerVer) {
+          channel.send({
+            type: 'broadcast',
+            event: 'state_sync',
+            payload: stateRef.current,
+          });
         }
       })
       .on('broadcast', { event: 'dish_patch' }, (payload) => {
@@ -202,17 +312,47 @@ export default function App() {
           setState((prev) => applyAdminDishPatch(prev, dishId, patch));
         }
       })
+      .on('broadcast', { event: 'ota_push' }, (payload) => {
+        const nextOta = (payload?.payload as { otaVersion?: number })?.otaVersion;
+        if (nextOta && nextOta > otaVersionRef.current) {
+          otaVersionRef.current = nextOta;
+          setState((prev) => ({ ...prev, otaVersion: nextOta }));
+          setLiveToast({
+            title: `OTA Live Update v${nextOta} Synced`,
+            body: 'Your installed app updated automatically over the air.',
+          });
+          window.setTimeout(() => setLiveToast(null), 4000);
+          const isNative = Boolean(
+            (
+              window as unknown as {
+                Capacitor?: { isNativePlatform?: () => boolean };
+              }
+            ).Capacitor?.isNativePlatform?.()
+          );
+          if (isNative) {
+            window.setTimeout(() => window.location.reload(), 900);
+          }
+        }
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           setState((prev) => ({ ...prev, realtimeConnected: true }));
+          channel.send({
+            type: 'broadcast',
+            event: 'sync_request',
+            payload: { fromVersion: stateVersionRef.current },
+          });
         }
       });
 
     channelRef.current = channel;
 
-    // 3. Foreground / App-Switch Resume Listener + Fast Cloud Polling Fallback (every 1.5s)
-    // Ensures switching between Kitchen APK and Waiter APK on the same phone always syncs!
     const syncFromCloud = () => {
+      channel.send({
+        type: 'broadcast',
+        event: 'sync_request',
+        payload: { fromVersion: stateVersionRef.current },
+      });
       fetchCloudEcosystemState().then((remote) => {
         if (active && remote) {
           applyIncomingRemoteState(remote);
@@ -220,10 +360,12 @@ export default function App() {
       });
     };
 
-    const pollInterval = window.setInterval(syncFromCloud, 1500);
+    const pollInterval = window.setInterval(syncFromCloud, 4000);
+    const otaInterval = window.setInterval(checkRemoteOta, 30000);
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         syncFromCloud();
+        checkRemoteOta();
       }
     };
     window.addEventListener('focus', syncFromCloud);
@@ -232,13 +374,13 @@ export default function App() {
     return () => {
       active = false;
       window.clearInterval(pollInterval);
+      window.clearInterval(otaInterval);
       window.removeEventListener('focus', syncFromCloud);
       document.removeEventListener('visibilitychange', handleVisibility);
       supabase.removeChannel(channel);
     };
   }, [applyIncomingRemoteState]);
 
-  // Unified Mutator: Updates Local State + Broadcasts via WebSocket + Saves to Supabase Cloud
   const commitAndSync = (
     recipe: (prev: CafeEcosystemState) => CafeEcosystemState,
     alertInfo?: {
@@ -260,7 +402,7 @@ export default function App() {
         minute: '2-digit',
         second: '2-digit',
       });
-      const latencyMs = Math.floor(105 + Math.random() * 65);
+      const latencyMs = Math.floor(95 + Math.random() * 55);
 
       let nextPushEvents = baseNext.pushEvents;
       let nextAlert: CrossDeviceAlert | undefined = baseNext.lastAlert;
@@ -303,18 +445,50 @@ export default function App() {
         lastAlert: nextAlert,
       };
 
-      // Broadcast over Supabase Realtime WebSocket immediately
       channelRef.current?.send({
         type: 'broadcast',
         event: 'state_sync',
         payload: finalState,
       });
 
-      // Persist to Supabase Cloud Storage so switching APKs on the phone stays 100% synced
       saveCloudEcosystemState(finalState);
 
       return finalState;
     });
+  };
+
+  // Push Over-The-Air (OTA) Live Update to all installed APKs without re-downloading APK files
+  const handlePushLiveOtaUpdate = async () => {
+    setIsPushingOta(true);
+    soundFX.play('served');
+    const nextOta = (state.otaVersion || 240) + 1;
+    otaVersionRef.current = nextOta;
+
+    await pushOtaManifestUpdate(
+      nextOta,
+      `Live UI & Menu state synced over the air (v${nextOta})`
+    );
+
+    channelRef.current?.send({
+      type: 'broadcast',
+      event: 'ota_push',
+      payload: { otaVersion: nextOta },
+    });
+
+    commitAndSync(
+      (prev) => ({
+        ...prev,
+        otaVersion: nextOta,
+      }),
+      {
+        targetApk: 'com.buildbros.waiter',
+        channel: 'supabase_ota:live_bundle',
+        title: `OTA Live Update v${nextOta} Pushed`,
+        body: 'All installed Waiter, Kitchen & Admin phone apps updated over the air.',
+        notifyCurrentDeviceToo: true,
+      }
+    );
+    setIsPushingOta(false);
   };
 
   // Available dishes in selected sub-section
@@ -338,7 +512,6 @@ export default function App() {
     setGuestStep('deck');
   };
 
-  // Guest Web Menu Handlers
   const handleAddToCart = (dish: DishItem) => {
     if (!dish.isAvailable) return;
     soundFX.play('cartAdd');
@@ -361,7 +534,6 @@ export default function App() {
     }));
   };
 
-  // Swipe Deck Actions: Swipe Left = Skip, Swipe Right = Add to Cart
   const triggerSwipeAction = (direction: 'left' | 'right') => {
     if (!currentDeckDish || exitDirection) return;
     const dish = currentDeckDish;
@@ -434,7 +606,7 @@ export default function App() {
     }
   };
 
-  // Level 2: Call the Waiter (Syncs to Waiter APK & fires urgent notification)
+  // Level 2: Call the Waiter
   const handleGuestCallWaiter = () => {
     soundFX.play('waiterCall');
     const total = calculateCartTotal(state.cart);
@@ -446,7 +618,7 @@ export default function App() {
       second: '2-digit',
     });
 
-    setWaiterTab('calls');
+    setWaiterTab((prev) => (prev === 'floor' ? 'queue' : prev));
     commitAndSync(
       (prev) => ({
         ...prev,
@@ -477,7 +649,7 @@ export default function App() {
     );
   };
 
-  // Level 3: Send the Order (Syncs to Kitchen APK & fires pass bell notification)
+  // Level 3: Send the Order
   const handleGuestPlaceOrder = () => {
     if (state.cart.length === 0) return;
     soundFX.play('ticketSent');
@@ -503,8 +675,9 @@ export default function App() {
             totalAmount,
             receptionConfirmed: prev.autoRouteToKitchen,
             status: prev.autoRouteToKitchen ? 'cooking' : 'incoming',
-            notes: '',
+            notes: guestOrderNotes.trim(),
             createdAt: now,
+            checkedItemIds: [],
           },
           ...prev.orders,
         ],
@@ -524,6 +697,67 @@ export default function App() {
         targetApk: 'com.buildbros.kitchen',
         channel: 'fcm:kitchen_pass_bell',
         title: `NEW ORDER ${ticketNumber} · Table ${state.activeTable}`,
+        body: `${itemsSummary} (${state.currencySymbol}${totalAmount})`,
+        notifyCurrentDeviceToo: true,
+      }
+    );
+    setGuestOrderNotes('');
+  };
+
+  // Staff Assisted Order Entry from Floor Plan or Waiter Call
+  const handlePlaceAssistedOrder = (
+    tableNumber: number,
+    items: Array<{ dish: DishItem; qty: number }>
+  ) => {
+    if (items.length === 0) return;
+    soundFX.play('ticketSent');
+    const ticketNumber = `#0${Math.floor(413 + Math.random() * 85)}`;
+    const totalAmount = calculateCartTotal(items);
+    const itemsSummary = items.map((c) => `${c.qty}x ${c.dish.name}`).join(', ');
+    const now = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    commitAndSync(
+      (prev) => ({
+        ...prev,
+        waiterCalls: prev.waiterCalls.map((c) =>
+          c.tableNumber === tableNumber ? { ...c, status: 'completed' } : c
+        ),
+        orders: [
+          {
+            id: `ord-${Date.now()}`,
+            ticketNumber,
+            tableNumber,
+            items,
+            totalAmount,
+            receptionConfirmed: true,
+            status: 'cooking',
+            notes: 'Punched by Waiter at Table',
+            createdAt: now,
+            checkedItemIds: [],
+          },
+          ...prev.orders,
+        ],
+        tables: prev.tables.map((t) =>
+          t.tableNumber === tableNumber
+            ? {
+                ...t,
+                status: 'cooking',
+                activeTicket: ticketNumber,
+                cartTotal: totalAmount,
+                updatedAt: 'Just now',
+              }
+            : t
+        ),
+      }),
+      {
+        targetApk: 'com.buildbros.kitchen',
+        channel: 'fcm:kitchen_pass_bell',
+        title: `STAFF ORDER ${ticketNumber} · Table ${tableNumber}`,
         body: `${itemsSummary} (${state.currencySymbol}${totalAmount})`,
         notifyCurrentDeviceToo: true,
       }
@@ -583,6 +817,22 @@ export default function App() {
     );
   };
 
+  // Kitchen KDS: Toggle Dish Item Plated Checkmark
+  const handleKitchenToggleItemCheck = (orderId: string, dishId: string) => {
+    soundFX.play('tap');
+    commitAndSync((prev) => ({
+      ...prev,
+      orders: prev.orders.map((o) => {
+        if (o.id !== orderId) return o;
+        const current = o.checkedItemIds || [];
+        const next = current.includes(dishId)
+          ? current.filter((id) => id !== dishId)
+          : [...current, dishId];
+        return { ...o, checkedItemIds: next };
+      }),
+    }));
+  };
+
   // Kitchen & Reception KDS APK: Confirm Incoming Order or Set Any Stage Directly
   const handleKitchenSetOrderStatus = (
     orderId: string,
@@ -594,8 +844,8 @@ export default function App() {
     const isReady = nextStatus === 'ready';
     soundFX.play(isReady ? 'kitchenReady' : nextStatus === 'served' ? 'served' : 'tap');
 
-    if (isReady) {
-      setWaiterTab('pickup');
+    if (isReady && waiterTab !== 'pickup') {
+      setWaiterTab('queue');
     }
 
     const itemsSummary = target.items.map((i) => `${i.qty}x ${i.dish.name}`).join(', ');
@@ -654,7 +904,6 @@ export default function App() {
     handleKitchenSetOrderStatus(orderId, nextStatusMap[target.status]);
   };
 
-  // Spawn / Reset Demo Orders so Kitchen & Waiter always have active tickets to test
   const handleSpawnFreshKitchenTicket = () => {
     soundFX.play('ticketSent');
     const ticketNumber = `#0${Math.floor(415 + Math.random() * 80)}`;
@@ -682,8 +931,9 @@ export default function App() {
             totalAmount,
             receptionConfirmed: true,
             status: 'cooking',
-            notes: 'Fresh test ticket',
+            notes: 'Fresh pass ticket',
             createdAt: now,
+            checkedItemIds: [],
           },
           ...prev.orders.map((o) =>
             o.ticketNumber === '#0412'
@@ -702,7 +952,6 @@ export default function App() {
     );
   };
 
-  // Admin APK Handlers
   const handleAdminSavePrice = (dishId: string) => {
     const parsed = parseFloat(priceDraft);
     if (!Number.isNaN(parsed) && parsed > 0) {
@@ -778,16 +1027,16 @@ export default function App() {
   if (view === 'theme-catalogue') {
     return (
       <div>
-        <div className="bg-[#140905] text-[#FBEFE6] px-4 py-2.5 flex items-center justify-between border-b border-[#FBEFE6]/15">
+        <div className="bg-[#140905] text-[#FBEFE6] px-6 py-3 flex items-center justify-between border-b border-[#2A180D]">
           <span className="font-mono-code text-[12px] text-[#C4F042]">
-            The Cafe Ecosystem · 4-Theme Guest Menu &amp; POS Suite
+            Roast &amp; Co. OS · 4-Theme Guest Menu &amp; POS Suite
           </span>
           <button
             type="button"
             onClick={() => setView('split-suite')}
-            className="px-3 py-1 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] text-[12px] font-semibold cursor-pointer"
+            className="px-4 py-1.5 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] text-[12px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
           >
-            ← Back to Command Center
+            Back to Command Suite
           </button>
         </div>
         <ThemeCataloguePage
@@ -820,6 +1069,7 @@ export default function App() {
     state.orders.find((o) => o.tableNumber === state.activeTable) || state.orders[0];
   const readyOrders = state.orders.filter((o) => o.status === 'ready');
   const pendingCalls = state.waiterCalls.filter((c) => c.status === 'pending');
+  const activeKitchenOrders = state.orders.filter((o) => o.status !== 'served');
   const shiftRevenue = state.tables.reduce((acc, t) => acc + (t.cartTotal || 0), 0);
 
   const effectiveX =
@@ -830,19 +1080,19 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F7F2ED] text-[#1A0C06] flex flex-col">
-      {/* High-Priority Heads-Up Notification Toast Banner (Appears on Cross-Device Events) */}
+      {/* High-Priority Heads-Up Notification Toast Banner */}
       {liveToast && (
         <div
           role="alert"
           aria-live="assertive"
           data-testid="live-push-toast"
-          className="fixed top-3 left-3 right-3 z-50 max-w-[520px] mx-auto p-3.5 rounded-[14px] bg-[#140905] text-[#FBEFE6] border-2 border-[#C4F042] flex items-center justify-between gap-3"
+          className="fixed top-4 left-4 right-4 z-50 max-w-[500px] mx-auto p-4 rounded-[16px] bg-[#140905] text-[#FBEFE6] border-2 border-[#C4F042] flex items-center justify-between gap-3"
         >
           <div className="min-w-0">
-            <div className="font-mono-code text-[11px] font-bold text-[#C4F042] uppercase">
-              ● LIVE PUSH NOTIFICATION
+            <div className="font-mono-code text-[11px] font-bold text-[#C4F042]">
+              Live Cross-Device Alert · OTA v{state.otaVersion || 240}
             </div>
-            <div className="font-bold text-[14px] text-[#FFFFFF] truncate">
+            <div className="font-bold text-[14px] text-[#FFFFFF] truncate mt-0.5">
               {liveToast.title}
             </div>
             <div className="text-[12px] text-[#FBEFE6]/85 truncate">{liveToast.body}</div>
@@ -850,41 +1100,44 @@ export default function App() {
           <button
             type="button"
             onClick={() => setLiveToast(null)}
-            className="px-2.5 py-1 rounded-[8px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[11px] font-bold cursor-pointer shrink-0"
+            className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
           >
-            OK
+            Dismiss
           </button>
         </div>
       )}
 
-      {/* Top Product Command Header (Hidden when compiled as a dedicated single-role Android APK) */}
+      {/* =====================================================================
+          STRICT 3-ZONE TOP BAR CONTRACT (frontend-design §2)
+          [Zone 1: Single Wordmark] — [Zone 2: 5 Nav Links] — [Zone 3: 1 Primary CTA]
+         ===================================================================== */}
       {!DEDICATED_APK_ROLE && (
-        <header className="bg-[#140905] text-[#FBEFE6] border-b border-[#2A180D] px-4 md:px-6 py-3 sticky top-0 z-40">
-          <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-4">
-            {/* Zone 1: Brand Title */}
+        <header className="bg-[#140905] text-[#FBEFE6] border-b border-[#2A180D] px-6 py-4 sticky top-0 z-40">
+          <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-8">
+            {/* Zone 1: Single text element wordmark */}
             <a
               href="#top"
               onClick={(e) => {
                 e.preventDefault();
                 setView('split-suite');
               }}
-              className="text-[17px] font-bold tracking-tight text-[#FBEFE6] no-underline whitespace-nowrap shrink-0"
+              className="text-[19px] font-bold tracking-tight text-[#FBEFE6] no-underline whitespace-nowrap shrink-0"
             >
-              The Cafe Ecosystem
+              Roast &amp; Co. OS
             </a>
 
-            {/* Zone 2: Surface Switcher Links */}
+            {/* Zone 2: 5 concise single-line text navigation links */}
             <nav
               aria-label="Product surfaces"
-              className="hidden lg:flex items-center gap-5 text-[13px] font-medium"
+              className="hidden md:flex items-center gap-6 text-[13px] font-medium"
             >
               {(
                 [
-                  { id: 'split-suite', label: 'All 4 Surfaces' },
-                  { id: 'guest-web', label: '1. Guest Swipe Menu' },
-                  { id: 'waiter-apk', label: '2. Waiter App' },
-                  { id: 'kitchen-apk', label: '3. Kitchen KDS App' },
-                  { id: 'admin-apk', label: '4. Owner Admin App' },
+                  { id: 'split-suite', label: 'Live Suite' },
+                  { id: 'guest-web', label: 'Guest Menu' },
+                  { id: 'waiter-apk', label: 'Waiter App' },
+                  { id: 'kitchen-apk', label: 'Kitchen KDS' },
+                  { id: 'admin-apk', label: 'Owner Studio' },
                 ] as Array<{ id: ActiveWorkspaceView; label: string }>
               ).map((tab) => (
                 <button
@@ -902,10 +1155,77 @@ export default function App() {
               ))}
             </nav>
 
-            {/* Zone 3: Level Switcher + 4-Theme Catalogue */}
-            <div className="flex items-center gap-2 shrink-0">
+            {/* Zone 3: 1 Primary Action Button (Push Live OTA Update to Phones) */}
+            <div className="flex items-center shrink-0">
+              <button
+                type="button"
+                data-testid="push-live-ota-btn"
+                onClick={handlePushLiveOtaUpdate}
+                disabled={isPushingOta}
+                className="px-4 py-2 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {isPushingOta
+                  ? 'Pushing OTA...'
+                  : `Push OTA Update (v${state.otaVersion || 240})`}
+              </button>
+            </div>
+          </div>
+        </header>
+      )}
+
+      {/* =====================================================================
+          VENUE CONTEXT & MODE TOOLBAR (Below Header, hidden on single-role APK)
+         ===================================================================== */}
+      {!DEDICATED_APK_ROLE && (
+        <div className="bg-[#EFE8E0] border-b border-[#E3D9D3] px-4 sm:px-6 py-2.5">
+          <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
+            {/* Mobile Surface Switcher + Venue KPI Summary */}
+            <div className="flex flex-wrap items-center gap-3 text-[12px] text-[#6C625C]">
+              <div className="flex md:hidden items-center gap-1">
+                {(
+                  [
+                    { id: 'split-suite', label: 'Suite' },
+                    { id: 'guest-web', label: 'Guest' },
+                    { id: 'waiter-apk', label: 'Waiter' },
+                    { id: 'kitchen-apk', label: 'Kitchen' },
+                    { id: 'admin-apk', label: 'Admin' },
+                  ] as Array<{ id: ActiveWorkspaceView; label: string }>
+                ).map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setView(t.id)}
+                    className={`px-2.5 py-1 rounded-[6px] text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
+                      view === t.id
+                        ? 'bg-[#140905] text-[#FBEFE6]'
+                        : 'bg-[#FFFFFF] text-[#1A0C06]'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              <span className="font-semibold text-[#1A0C06]">{state.venueName}</span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono-code tabular-nums">
+                Active Table {state.activeTable}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono-code tabular-nums">
+                Shift Revenue {state.currencySymbol}
+                {shiftRevenue}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono-code tabular-nums text-[#3F6212] font-semibold">
+                {readyOrders.length} Ready at Pass
+              </span>
+            </div>
+
+            {/* Interactive Controls: Service Level + Sound + Theme Catalogue */}
+            <div className="flex flex-wrap items-center gap-2">
               <div
-                className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
+                className="flex items-center gap-1 bg-[#FFFFFF] border border-[#E3D9D3] p-1 rounded-[8px]"
                 role="group"
                 aria-label="Venue Service Level"
               >
@@ -915,10 +1235,10 @@ export default function App() {
                     type="button"
                     data-testid={`switch-level-${lvl}-btn`}
                     onClick={() => handleSwitchLevel(lvl)}
-                    className={`px-2 py-1 rounded-[6px] font-mono-code text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                    className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                       state.serviceLevel === lvl
-                        ? 'bg-[#E8500C] text-[#FBEFE6]'
-                        : 'text-[#FBEFE6]/75 hover:text-[#FFFFFF]'
+                        ? 'bg-[#140905] text-[#FBEFE6]'
+                        : 'text-[#6C625C] hover:text-[#1A0C06]'
                     }`}
                   >
                     Level {lvl}
@@ -928,63 +1248,37 @@ export default function App() {
 
               <button
                 type="button"
+                onClick={toggleSound}
+                aria-pressed={soundEnabled}
+                className="px-3 py-1.5 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {soundEnabled ? 'Chime Audio: ON' : 'Chime Audio: OFF'}
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setView('theme-catalogue')}
-                className="hidden sm:inline-block px-3 py-1.5 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] text-[12px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 rounded-[8px] bg-[#140905] text-[#FBEFE6] text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
               >
                 4-Theme Catalogue
               </button>
             </div>
           </div>
-
-          {/* Mobile surface switcher bar (only in web multi-surface preview) */}
-          <div className="flex lg:hidden items-center justify-between gap-1 pt-2.5 mt-2.5 border-t border-[#2A180D]">
-            <div className="flex items-center gap-1 overflow-x-auto">
-              {(
-                [
-                  { id: 'split-suite', label: 'All 4' },
-                  { id: 'guest-web', label: 'Guest' },
-                  { id: 'waiter-apk', label: 'Waiter' },
-                  { id: 'kitchen-apk', label: 'Kitchen' },
-                  { id: 'admin-apk', label: 'Admin' },
-                ] as Array<{ id: ActiveWorkspaceView; label: string }>
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setView(t.id)}
-                  className={`px-2.5 py-1 rounded-[6px] text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
-                    view === t.id
-                      ? 'bg-[#E8500C] text-[#FBEFE6]'
-                      : 'bg-[#2A180D] text-[#FBEFE6]/80'
-                  }`}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-
-            <button
-              type="button"
-              onClick={toggleSound}
-              aria-pressed={soundEnabled}
-              className="px-2 py-1 rounded-[6px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[10px] font-semibold cursor-pointer shrink-0"
-            >
-              {soundEnabled ? 'Audio ON' : 'Audio OFF'}
-            </button>
-          </div>
-        </header>
+        </div>
       )}
 
-      {/* Main Product Workspace */}
+      {/* =====================================================================
+          MAIN WORKSPACE STAGE
+         ===================================================================== */}
       <main
-        className={`flex-1 w-full mx-auto flex flex-col gap-5 ${
+        className={`flex-1 w-full mx-auto flex flex-col gap-6 ${
           DEDICATED_APK_ROLE
-            ? 'max-w-[600px] p-0'
-            : 'max-w-[1440px] px-3 sm:px-6 py-4 sm:py-6'
+            ? 'max-w-[640px] p-0'
+            : 'max-w-[1440px] px-4 sm:px-6 py-5 sm:py-6'
         }`}
       >
         {/* =====================================================================
-            SURFACE 4: OWNER / ADMIN APP (com.buildbros.admin)
+            SURFACE 4: OWNER STUDIO / ADMIN APP (com.buildbros.admin)
            ===================================================================== */}
         {(view === 'split-suite' || view === 'admin-apk') && (
           <section
@@ -992,27 +1286,22 @@ export default function App() {
             className={`bg-[#FFFFFF] overflow-hidden ${
               DEDICATED_APK_ROLE
                 ? 'min-h-screen border-0'
-                : 'rounded-[20px] border-2 border-[#1A0C06]'
+                : 'rounded-[20px] border border-[#E3D9D3]'
             }`}
             data-testid="surface-admin-apk"
           >
-            <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
+            {/* Owner Studio Header */}
+            <div className="bg-[#140905] text-[#FBEFE6] px-5 py-4 flex flex-wrap items-center justify-between gap-4">
               <div>
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold">
-                    OWNER ADMIN
-                  </span>
-                  <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-[#C4F042]">
-                    <span className="w-2 h-2 rounded-full bg-[#C4F042]" /> Live Cloud Sync
-                  </span>
+                <div className="text-[12px] text-[#C4F042] font-mono-code">
+                  Owner Studio · Live Cloud &amp; OTA Sync (v{state.otaVersion || 240})
                 </div>
-                <h2 className="text-[17px] font-bold m-0 mt-1">
-                  {state.venueName} · Controller
+                <h2 className="text-[20px] font-bold m-0 mt-0.5 text-balance">
+                  {state.venueName} · Venue Command &amp; Menu Studio
                 </h2>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                {/* Service Level Switcher inside Admin App so Owner APK always has it */}
+              <div className="flex flex-wrap items-center gap-2.5">
                 <div
                   className="flex items-center gap-1 bg-[#2A180D] p-1 rounded-[8px]"
                   role="group"
@@ -1023,7 +1312,7 @@ export default function App() {
                       key={lvl}
                       type="button"
                       onClick={() => handleSwitchLevel(lvl)}
-                      className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-bold cursor-pointer ${
+                      className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0 ${
                         state.serviceLevel === lvl
                           ? 'bg-[#E8500C] text-[#FBEFE6]'
                           : 'text-[#FBEFE6]/70'
@@ -1034,20 +1323,25 @@ export default function App() {
                   ))}
                 </div>
 
-                <span className="px-2.5 py-1 rounded-[8px] bg-[#2A180D] font-mono-code text-[12px] font-bold text-[#C4F042]">
-                  {state.currencySymbol}
-                  {shiftRevenue}
-                </span>
+                <button
+                  type="button"
+                  onClick={handlePushLiveOtaUpdate}
+                  className="px-3 py-1.5 rounded-[8px] bg-[#C4F042] text-[#140905] font-mono-code text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Push OTA Update (v{state.otaVersion || 240})
+                </button>
               </div>
             </div>
 
-            <div className="px-4 py-2.5 bg-[#F7F2ED] border-b border-[#E3D9D3] flex flex-wrap items-center justify-between gap-2">
+            {/* Owner Studio Navigation Bar */}
+            <div className="px-5 py-3 bg-[#F7F2ED] border-b border-[#E3D9D3] flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 {(
                   [
-                    { id: 'menu', label: 'Menu & 86 Editor' },
-                    { id: 'floor', label: `${state.tables.length}-Table Floor` },
+                    { id: 'menu', label: 'Menu & 86 Studio' },
+                    { id: 'floor', label: `Interactive Floor Map (${state.tables.length})` },
                     { id: 'qr', label: 'Table QR Generator' },
+                    { id: 'ota', label: 'Live OTA & Phone Sync' },
                   ] as const
                 ).map((t) => (
                   <button
@@ -1055,10 +1349,10 @@ export default function App() {
                     type="button"
                     data-testid={`admin-tab-${t.id}`}
                     onClick={() => setAdminTab(t.id)}
-                    className={`px-3 py-1.5 rounded-[8px] text-[12px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                    className={`px-3.5 py-1.5 rounded-[8px] text-[12px] font-semibold cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                       adminTab === t.id
-                        ? 'bg-[#1A0C06] text-[#FBEFE6]'
-                        : 'bg-[#F3ECE5] text-[#6C625C] hover:text-[#1A0C06]'
+                        ? 'bg-[#140905] text-[#FBEFE6]'
+                        : 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#6C625C] hover:text-[#1A0C06]'
                     }`}
                   >
                     {t.label}
@@ -1074,7 +1368,7 @@ export default function App() {
                     autoRouteToKitchen: !prev.autoRouteToKitchen,
                   }))
                 }
-                className={`px-3 py-1.5 rounded-[8px] font-mono-code text-[11px] font-semibold border cursor-pointer transition-colors whitespace-nowrap ${
+                className={`px-3 py-1.5 rounded-[8px] font-mono-code text-[11px] font-semibold border cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                   state.autoRouteToKitchen
                     ? 'bg-[#FFEEE3] border-[#E8500C] text-[#C03E0A]'
                     : 'bg-[#FFFFFF] border-[#E3D9D3] text-[#6C625C]'
@@ -1084,60 +1378,64 @@ export default function App() {
               </button>
             </div>
 
-            <div className="p-4">
+            {/* Owner Studio Tab Panels */}
+            <div className="p-5">
               {adminTab === 'menu' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {state.dishes.map((dish) => {
                     const isEditing = editingDishId === dish.id;
                     return (
                       <div
                         key={dish.id}
-                        className={`p-3 rounded-[14px] border flex items-center justify-between gap-2 ${
+                        className={`p-3.5 rounded-[16px] border flex items-center justify-between gap-3 ${
                           dish.isAvailable
                             ? 'bg-[#F7F2ED] border-[#E3D9D3]'
-                            : 'bg-[#F3ECE5]/60 border-[#E3D9D3] opacity-70'
+                            : 'bg-[#F3ECE5]/60 border-[#E3D9D3] opacity-65'
                         }`}
                       >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-mono-code text-[10px] px-1.5 py-0.5 rounded bg-[#E3D9D3]/70 text-[#1A0C06]">
-                              {dish.category}
-                            </span>
-                            <span className="font-semibold text-[13px] text-[#1A0C06] truncate">
-                              {dish.name}
-                            </span>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-14 h-14 rounded-[10px] overflow-hidden bg-[#140905] shrink-0 border border-[#E3D9D3]">
+                            <DishPhotoWithFallback dish={dish} />
                           </div>
-                          <div className="flex items-center gap-2 mt-1">
-                            {isEditing ? (
-                              <div className="flex items-center gap-1">
-                                <input
-                                  type="number"
-                                  aria-label={`Edit price for ${dish.name}`}
-                                  value={priceDraft}
-                                  onChange={(e) => setPriceDraft(e.target.value)}
-                                  className="w-20 px-2 py-0.5 text-[12px] font-mono-code bg-[#FFFFFF] border border-[#1A0C06] rounded-[6px]"
-                                />
+                          <div className="min-w-0">
+                            <div className="text-[11px] text-[#6C625C] truncate">
+                              {dish.category} · {dish.dietary}
+                            </div>
+                            <div className="font-semibold text-[14px] text-[#1A0C06] truncate">
+                              {dish.name}
+                            </div>
+                            <div className="flex items-center gap-2 mt-1">
+                              {isEditing ? (
+                                <div className="flex items-center gap-1">
+                                  <input
+                                    type="number"
+                                    aria-label={`Edit price for ${dish.name}`}
+                                    value={priceDraft}
+                                    onChange={(e) => setPriceDraft(e.target.value)}
+                                    className="w-20 px-2 py-0.5 text-[12px] font-mono-code bg-[#FFFFFF] border border-[#1A0C06] rounded-[6px]"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleAdminSavePrice(dish.id)}
+                                    className="px-2.5 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                                  >
+                                    Save
+                                  </button>
+                                </div>
+                              ) : (
                                 <button
                                   type="button"
-                                  onClick={() => handleAdminSavePrice(dish.id)}
-                                  className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] text-[11px] font-semibold cursor-pointer"
+                                  onClick={() => {
+                                    setEditingDishId(dish.id);
+                                    setPriceDraft(String(dish.price));
+                                  }}
+                                  className="font-mono-code text-[12px] font-bold text-[#C03E0A] hover:underline cursor-pointer tabular-nums whitespace-nowrap"
                                 >
-                                  Save
+                                  {state.currencySymbol}
+                                  {dish.price} · Edit Price
                                 </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingDishId(dish.id);
-                                  setPriceDraft(String(dish.price));
-                                }}
-                                className="font-mono-code text-[12px] font-bold text-[#C03E0A] hover:underline cursor-pointer tabular-nums"
-                              >
-                                {state.currencySymbol}
-                                {dish.price} · Edit Price
-                              </button>
-                            )}
+                              )}
+                            </div>
                           </div>
                         </div>
 
@@ -1145,13 +1443,13 @@ export default function App() {
                           type="button"
                           onClick={() => handleAdminToggle86(dish.id)}
                           aria-label={`Toggle 86 sold out for ${dish.name}`}
-                          className={`px-2.5 py-1.5 rounded-[8px] font-mono-code text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
+                          className={`px-3 py-1.5 rounded-[8px] font-mono-code text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0 ${
                             dish.isAvailable
                               ? 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] hover:bg-[#FFEEE3]'
-                              : 'bg-[#1A0C06] text-[#FBEFE6]'
+                              : 'bg-[#140905] text-[#FBEFE6]'
                           }`}
                         >
-                          {dish.isAvailable ? '86 Sold Out' : 'Sold Out (Restock)'}
+                          {dish.isAvailable ? '86 Sold Out' : 'Restock'}
                         </button>
                       </div>
                     );
@@ -1160,38 +1458,28 @@ export default function App() {
               )}
 
               {adminTab === 'floor' && (
-                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2.5">
-                  {state.tables.map((t) => {
-                    const isSelected = state.activeTable === t.tableNumber;
-                    return (
-                      <button
-                        key={t.tableNumber}
-                        type="button"
-                        onClick={() =>
-                          setState((prev) => ({ ...prev, activeTable: t.tableNumber }))
-                        }
-                        className={`p-3 rounded-[14px] border text-left flex flex-col gap-1 cursor-pointer transition-colors ${
-                          isSelected
-                            ? 'bg-[#140905] text-[#FBEFE6] border-[#E8500C]'
-                            : 'bg-[#F7F2ED] text-[#1A0C06] border-[#E3D9D3] hover:border-[#1A0C06]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-mono-code font-bold text-[13px]">
-                            Table {t.tableNumber}
-                          </span>
-                          <span className="text-[10px] font-mono-code opacity-75">{t.seats}p</span>
-                        </div>
-                        <span className="text-[11px] font-semibold capitalize text-[#E8500C]">
-                          {t.status.replace('_', ' ')}
-                        </span>
-                        <span className="text-[10px] font-mono-code opacity-75 tabular-nums">
-                          {t.cartTotal ? `${state.currencySymbol}${t.cartTotal}` : t.updatedAt}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+                <TopDownFloorMap
+                  tables={state.tables}
+                  activeTable={state.activeTable}
+                  currencySymbol={state.currencySymbol}
+                  orders={state.orders}
+                  waiterCalls={state.waiterCalls}
+                  dishes={state.dishes}
+                  onSelectTable={(tableNumber) =>
+                    setState((prev) => ({ ...prev, activeTable: tableNumber }))
+                  }
+                  onAcknowledgeCall={handleWaiterAcknowledge}
+                  onServeOrder={handleWaiterServeOrder}
+                  onPlaceAssistedOrder={handlePlaceAssistedOrder}
+                  onOpenTableGuestMenu={(tableNumber) => {
+                    soundFX.play('tap');
+                    setState((prev) => ({ ...prev, activeTable: tableNumber }));
+                    setGuestStep('deck');
+                    if (view === 'admin-apk') {
+                      setView('guest-web');
+                    }
+                  }}
+                />
               )}
 
               {adminTab === 'qr' && (
@@ -1215,20 +1503,82 @@ export default function App() {
                   }}
                 />
               )}
+
+              {adminTab === 'ota' && (
+                <div
+                  className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start"
+                  data-testid="admin-ota-sync-panel"
+                >
+                  <div className="lg:col-span-6 p-5 rounded-[16px] bg-[#140905] text-[#FBEFE6] flex flex-col gap-3">
+                    <div className="font-mono-code text-[11px] text-[#C4F042] uppercase">
+                      Over-The-Air (OTA) Live Phone Updater
+                    </div>
+                    <h3 className="text-[18px] font-bold m-0">
+                      Update Installed Phone APKs Without Re-Downloading
+                    </h3>
+                    <p className="text-[13px] text-[#FBEFE6]/80 m-0 leading-relaxed">
+                      Every installed Android APK (Waiter, Kitchen KDS, and Owner Admin) checks{' '}
+                      <code className="text-[#C4F042]">ota/manifest.json</code> and subscribes to{' '}
+                      <code className="text-[#C4F042]">cafe-ecosystem-realtime</code>. Pushing an
+                      OTA update broadcasts the new bundle and state live to all phones in under 2
+                      seconds.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={handlePushLiveOtaUpdate}
+                        className="px-4 py-2.5 rounded-[10px] bg-[#C4F042] text-[#140905] font-mono-code text-[12px] font-bold cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        Push Live OTA Update Now (v{(state.otaVersion || 240) + 1}) →
+                      </button>
+                      <span className="font-mono-code text-[12px] text-[#FBEFE6]/75 tabular-nums">
+                        Current OTA: v{state.otaVersion || 240} · State v{state.stateVersion}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="lg:col-span-6 p-5 rounded-[16px] bg-[#F7F2ED] border border-[#E3D9D3] flex flex-col gap-3">
+                    <div className="font-mono-code text-[11px] font-bold text-[#C03E0A] uppercase">
+                      Recent Cross-Device Sync &amp; Push Events
+                    </div>
+                    <div className="flex flex-col gap-2 max-h-[220px] overflow-y-auto">
+                      {state.pushEvents.slice(0, 6).map((evt) => (
+                        <div
+                          key={evt.id}
+                          className="p-3 rounded-[12px] bg-[#FFFFFF] border border-[#E3D9D3] flex items-center justify-between gap-2 text-[12px]"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-semibold text-[#1A0C06] truncate">
+                              {evt.title}
+                            </div>
+                            <div className="text-[11px] text-[#6C625C] truncate">{evt.body}</div>
+                          </div>
+                          <span className="font-mono-code text-[10px] text-[#6C625C] shrink-0 tabular-nums">
+                            {evt.latencyMs}ms · {evt.timestamp}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         )}
 
-        {/* 3 Operational Surfaces Grid: Guest Swipe Deck Menu + Waiter App + Kitchen & Reception KDS App */}
+        {/* =====================================================================
+            3 OPERATIONAL SURFACES STAGE:
+            1. Guest Swipe Menu · 2. Waiter Handheld App · 3. Kitchen Pass KDS App
+           ===================================================================== */}
         <div
           className={`grid gap-6 items-start ${
             view === 'split-suite'
-              ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
-              : 'grid-cols-1 w-full'
+              ? 'grid-cols-1 lg:grid-cols-3'
+              : 'grid-cols-1 max-w-[680px] mx-auto w-full'
           }`}
         >
           {/* =====================================================================
-              SURFACE 1: GUEST WEB MENU (SWIPE DECK + SUB-SECTIONS + CART VIEW)
+              SURFACE 1: GUEST TABLE MENU (SWIPE DECK + SUB-SECTIONS + CART VIEW)
              ===================================================================== */}
           {(view === 'split-suite' || view === 'guest-web') && (
             <section
@@ -1236,121 +1586,116 @@ export default function App() {
               className={`bg-[#FFFFFF] overflow-hidden flex flex-col ${
                 DEDICATED_APK_ROLE
                   ? 'min-h-screen border-0'
-                  : 'rounded-[24px] border-2 border-[#1A0C06]'
+                  : 'rounded-[22px] border border-[#E3D9D3]'
               }`}
               data-testid="surface-guest-web"
             >
               {/* Top Venue Header + Cart Button */}
-              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3.5 border-b border-[#2A180D] flex items-center justify-between gap-2">
+              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-4 border-b border-[#2A180D] flex items-center justify-between gap-3">
                 <div>
-                  <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] block">
-                    TABLE {state.activeTable} · SWIPE MENU · DEMO
-                  </span>
-                  <h3 className="text-[16px] font-bold text-[#FBEFE6] m-0">
+                  <div className="font-mono-code text-[11px] text-[#C4F042]">
+                    Table {state.activeTable} · Level {state.serviceLevel} · Demo
+                  </div>
+                  <h3 className="text-[18px] font-bold text-[#FBEFE6] m-0 mt-0.5">
                     {state.venueName}
                   </h3>
                 </div>
 
-                <div className="flex items-center gap-1.5">
-                  <span className="px-2 py-1 rounded-[8px] bg-[#2A180D] text-[#C4F042] font-mono-code text-[11px] font-semibold">
-                    L{state.serviceLevel}
-                  </span>
-                  {state.serviceLevel >= 2 && (
-                    <button
-                      type="button"
-                      data-testid="header-cart-btn"
-                      onClick={() => {
-                        soundFX.play('tap');
-                        setGuestStep((prev) => (prev === 'cart' ? 'deck' : 'cart'));
-                      }}
-                      className="px-3 py-1.5 rounded-[8px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer tabular-nums"
-                    >
-                      {guestStep === 'cart'
-                        ? '← Deck'
-                        : `Cart (${cartCount}) · ${state.currencySymbol}${cartTotal}`}
-                    </button>
-                  )}
-                </div>
+                {state.serviceLevel >= 2 && (
+                  <button
+                    type="button"
+                    data-testid="header-cart-btn"
+                    onClick={() => {
+                      soundFX.play('tap');
+                      setGuestStep((prev) => (prev === 'cart' ? 'deck' : 'cart'));
+                    }}
+                    className="px-3.5 py-2 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer tabular-nums whitespace-nowrap shrink-0"
+                  >
+                    {guestStep === 'cart'
+                      ? '← Swipe Deck'
+                      : `Cart (${cartCount}) · ${state.currencySymbol}${cartTotal}`}
+                  </button>
+                )}
               </div>
 
               {guestStep === 'cart' && state.serviceLevel >= 2 ? (
                 /* ===============================================================
-                   GUEST CART VIEW (Done Picking -> Click Cart)
+                   GUEST TABLE CART & LIVE ORDER RADAR
                    Level 2 = "Call the Waiter" button
                    Level 3 = "Send the Order" button
                    =============================================================== */
-                <div className="p-4 flex flex-col gap-3.5" data-testid="guest-cart-view">
-                  <div className="flex items-center justify-between border-b border-[#E3D9D3] pb-2.5">
+                <div className="p-4 flex flex-col gap-4" data-testid="guest-cart-view">
+                  <div className="flex items-center justify-between border-b border-[#E3D9D3] pb-3">
                     <div>
-                      <span className="font-mono-code text-[10px] font-bold uppercase text-[#C03E0A] block">
-                        DONE PICKING · TABLE {state.activeTable} CART
-                      </span>
-                      <h4 className="text-[16px] font-bold text-[#1A0C06] m-0">
-                        Your Picked Dishes ({cartCount})
+                      <div className="font-mono-code text-[11px] text-[#C03E0A] font-semibold">
+                        Table {state.activeTable} Tray · Done Picking
+                      </div>
+                      <h4 className="text-[17px] font-bold text-[#1A0C06] m-0 mt-0.5">
+                        Picked Dishes ({cartCount})
                       </h4>
                     </div>
                     <button
                       type="button"
                       data-testid="guest-back-to-deck-btn"
                       onClick={() => setGuestStep('deck')}
-                      className="px-2.5 py-1 rounded-[8px] bg-[#F3ECE5] hover:bg-[#E3D9D3] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer"
+                      className="px-3 py-1.5 rounded-[8px] bg-[#F7F2ED] border border-[#E3D9D3] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
                     >
-                      ← Back to Swipe Deck
+                      ← Back to Deck
                     </button>
                   </div>
 
-                  {/* Live Level 2 Waiter Standby Status inside Cart */}
+                  {/* Live Level 2 Waiter Status Banner */}
                   {activeTableCall && (
                     <div
                       role="status"
                       aria-live="polite"
                       data-testid="guest-cart-waiter-status"
-                      className={`p-3 rounded-[12px] border-2 flex flex-col gap-1 ${
+                      className={`p-3.5 rounded-[14px] border flex flex-col gap-1 ${
                         activeTableCall.status === 'acknowledged'
                           ? 'bg-[#140905] text-[#C4F042] border-[#C4F042]'
                           : 'bg-[#FFEEE3] text-[#1A0C06] border-[#E8500C]'
                       }`}
                     >
-                      <div className="flex items-center justify-between font-mono-code text-[11px] font-bold uppercase">
+                      <div className="flex items-center justify-between font-mono-code text-[11px] font-bold">
                         <span>
                           {activeTableCall.status === 'acknowledged'
-                            ? '✓ WAITER ON MY WAY TO TABLE ' + state.activeTable
-                            : '● WAITER NOTIFIED · STANDBY AT TABLE ' + state.activeTable}
+                            ? `✓ Waiter Walking to Table ${state.activeTable}`
+                            : `Waiter Notified · Table ${state.activeTable}`}
                         </span>
-                        <span>{activeTableCall.createdAt}</span>
+                        <span className="tabular-nums">{activeTableCall.createdAt}</span>
                       </div>
                       <p className="text-[12px] opacity-90 m-0">
                         {activeTableCall.status === 'acknowledged'
-                          ? 'Staff #04 acknowledged your call on the Waiter APK and is walking to your table now.'
-                          : 'Your cart snapshot and Table number were pushed to the Waiter APK.'}
+                          ? 'Staff #04 claimed your call on the Waiter app and is coming to confirm your order.'
+                          : 'Your picked cart and table number are flashing on the Waiter handheld.'}
                       </p>
                     </div>
                   )}
 
-                  {/* Live Level 3 Order Status Tracker inside Cart */}
+                  {/* Live Level 3 Kitchen Tracker */}
                   {state.serviceLevel === 3 && activeTableOrder && (
                     <div
                       role="status"
                       aria-live="polite"
                       data-testid="guest-cart-order-status"
-                      className="p-3 rounded-[12px] bg-[#F7F2ED] border border-[#E8500C] flex flex-col gap-2"
+                      className="p-3.5 rounded-[14px] bg-[#F7F2ED] border border-[#E3D9D3] flex flex-col gap-2.5"
                     >
                       <div className="flex items-center justify-between text-[12px]">
-                        <span className="font-mono-code font-bold text-[#1A0C06]">
+                        <span className="font-mono-code font-bold text-[#1A0C06] tabular-nums">
                           Live Ticket {activeTableOrder.ticketNumber} · Table {state.activeTable}
                         </span>
-                        <span className="px-2 py-0.5 rounded bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold uppercase">
+                        <span className="font-mono-code text-[11px] font-bold uppercase text-[#C03E0A]">
                           {activeTableOrder.status}
                         </span>
                       </div>
-                      <div className="grid grid-cols-4 gap-1">
+                      <div className="grid grid-cols-4 gap-1.5">
                         {(['new', 'cooking', 'ready', 'served'] as const).map((st) => (
                           <div
                             key={st}
-                            className={`text-center py-1 rounded text-[9px] font-mono-code font-bold uppercase ${
+                            className={`text-center py-1.5 rounded-[6px] text-[10px] font-mono-code font-bold uppercase ${
                               activeTableOrder.status === st
-                                ? 'bg-[#1A0C06] text-[#C4F042]'
-                                : 'bg-[#E3D9D3]/60 text-[#6C625C]'
+                                ? 'bg-[#140905] text-[#C4F042]'
+                                : 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#6C625C]'
                             }`}
                           >
                             {st}
@@ -1360,38 +1705,43 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Cart Items List */}
+                  {/* Picked Cart Items */}
                   {state.cart.length === 0 ? (
-                    <div className="py-8 text-center flex flex-col items-center gap-2">
+                    <div className="py-8 text-center flex flex-col items-center gap-2.5">
                       <p className="text-[13px] text-[#6C625C] m-0">
-                        Your cart is empty. Swipe right on dish cards to add them!
+                        Your table tray is empty. Swipe right on dish cards to add them.
                       </p>
                       <button
                         type="button"
                         onClick={() => setGuestStep('deck')}
-                        className="px-4 py-2 rounded-[10px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer mt-1"
+                        className="px-4 py-2 rounded-[10px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold cursor-pointer"
                       >
-                        Open Swipe Deck →
+                        Browse Swipe Deck →
                       </button>
                     </div>
                   ) : (
-                    <div className="flex flex-col gap-2 max-h-[260px] overflow-y-auto pr-1">
+                    <div className="flex flex-col gap-2.5 max-h-[250px] overflow-y-auto pr-1">
                       {state.cart.map(({ dish, qty }) => (
                         <div
                           key={dish.id}
-                          className="p-2.5 rounded-[12px] bg-[#F7F2ED] border border-[#E3D9D3] flex items-center justify-between gap-2"
+                          className="p-2.5 rounded-[12px] bg-[#F7F2ED] border border-[#E3D9D3] flex items-center justify-between gap-2.5"
                         >
-                          <div className="min-w-0">
-                            <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
-                              {dish.name}
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-11 h-11 rounded-[8px] overflow-hidden bg-[#140905] shrink-0">
+                              <DishPhotoWithFallback dish={dish} />
                             </div>
-                            <div className="font-mono-code text-[11px] text-[#6C625C] tabular-nums">
-                              {state.currencySymbol}
-                              {dish.price} × {qty} ={' '}
-                              <strong className="text-[#1A0C06]">
+                            <div className="min-w-0">
+                              <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
+                                {dish.name}
+                              </div>
+                              <div className="font-mono-code text-[11px] text-[#6C625C] tabular-nums">
                                 {state.currencySymbol}
-                                {dish.price * qty}
-                              </strong>
+                                {dish.price} × {qty} ={' '}
+                                <strong className="text-[#1A0C06]">
+                                  {state.currencySymbol}
+                                  {dish.price * qty}
+                                </strong>
+                              </div>
                             </div>
                           </div>
 
@@ -1400,7 +1750,7 @@ export default function App() {
                               type="button"
                               onClick={() => handleRemoveFromCart(dish.id)}
                               aria-label={`Remove one ${dish.name}`}
-                              className="w-7 h-7 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
+                              className="w-8 h-8 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
                             >
                               −
                             </button>
@@ -1411,7 +1761,7 @@ export default function App() {
                               type="button"
                               onClick={() => handleAddToCart(dish)}
                               aria-label={`Add one ${dish.name}`}
-                              className="w-7 h-7 rounded-[8px] bg-[#1A0C06] text-[#FBEFE6] font-bold text-[14px] cursor-pointer"
+                              className="w-8 h-8 rounded-[8px] bg-[#140905] text-[#FBEFE6] font-bold text-[14px] cursor-pointer"
                             >
                               +
                             </button>
@@ -1421,13 +1771,25 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Cart Total & Level 2 ("Call the Waiter") / Level 3 ("Send the Order") Action Buttons */}
-                  <div className="pt-3 border-t border-[#E3D9D3] flex flex-col gap-2.5">
+                  {/* Kitchen Note Input */}
+                  {state.cart.length > 0 && (
+                    <input
+                      type="text"
+                      aria-label="Special kitchen note"
+                      placeholder="Add kitchen note (e.g. extra hot, oat milk, no onions)..."
+                      value={guestOrderNotes}
+                      onChange={(e) => setGuestOrderNotes(e.target.value)}
+                      className="px-3 py-2 rounded-[10px] bg-[#F7F2ED] border border-[#E3D9D3] text-[12px] text-[#1A0C06]"
+                    />
+                  )}
+
+                  {/* Cart Total & Level 2 / Level 3 Primary Action */}
+                  <div className="pt-3 border-t border-[#E3D9D3] flex flex-col gap-3">
                     <div className="flex items-center justify-between">
                       <span className="text-[13px] font-semibold text-[#6C625C]">
                         Table {state.activeTable} Total ({cartCount} items)
                       </span>
-                      <span className="font-mono-code text-[18px] font-bold text-[#1A0C06] tabular-nums">
+                      <span className="font-mono-code text-[20px] font-bold text-[#1A0C06] tabular-nums">
                         {state.currencySymbol}
                         {cartTotal}
                       </span>
@@ -1439,12 +1801,12 @@ export default function App() {
                         data-testid="guest-call-waiter-btn"
                         onClick={handleGuestCallWaiter}
                         disabled={cartCount === 0}
-                        className="w-full h-11 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer transition-colors"
+                        className="w-full h-12 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer transition-colors"
                       >
                         {activeTableCall?.status === 'acknowledged'
                           ? `✓ Waiter On My Way to Table ${state.activeTable}`
                           : activeTableCall?.status === 'pending'
-                          ? `Waiter Called · Call the Waiter Again`
+                          ? `Waiter Called · Ring Waiter Again`
                           : `Call the Waiter (Table ${state.activeTable} · ${state.currencySymbol}${cartTotal})`}
                       </button>
                     )}
@@ -1455,7 +1817,7 @@ export default function App() {
                         data-testid="guest-send-order-btn"
                         onClick={handleGuestPlaceOrder}
                         disabled={cartCount === 0}
-                        className="w-full h-11 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer transition-colors"
+                        className="w-full h-12 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] disabled:bg-[#E3D9D3] text-[#FBEFE6] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer transition-colors"
                       >
                         Send the Order (Table {state.activeTable} · {state.currencySymbol}
                         {cartTotal}) →
@@ -1468,19 +1830,19 @@ export default function App() {
                    GUEST MENU SWIPE DECK WITH SUB-SECTIONS
                    =============================================================== */
                 <>
-                  {/* Sub-Section Category Pills + Swipe/List Mode Toggle */}
-                  <div className="px-3.5 py-2.5 bg-[#F7F2ED] border-b border-[#E3D9D3] flex flex-col gap-2">
+                  {/* Sub-Section Filter Bar */}
+                  <div className="px-4 py-3 bg-[#F7F2ED] border-b border-[#E3D9D3] flex flex-col gap-2.5">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono-code text-[10px] font-bold uppercase text-[#6C625C]">
-                        SUB-SECTIONS ({filteredDishes.length} DISHES)
+                      <span className="font-mono-code text-[11px] font-semibold text-[#6C625C]">
+                        Menu Sub-Sections · {filteredDishes.length} Dishes
                       </span>
-                      <div className="flex items-center gap-1 bg-[#E3D9D3]/70 p-0.5 rounded-[7px]">
+                      <div className="flex items-center gap-1 bg-[#E3D9D3]/80 p-0.5 rounded-[8px]">
                         <button
                           type="button"
                           onClick={() => setGuestDisplayMode('swipe')}
-                          className={`px-2 py-0.5 rounded-[5px] font-mono-code text-[10px] font-bold cursor-pointer ${
+                          className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[10px] font-bold cursor-pointer whitespace-nowrap ${
                             guestDisplayMode === 'swipe'
-                              ? 'bg-[#1A0C06] text-[#FBEFE6]'
+                              ? 'bg-[#140905] text-[#FBEFE6]'
                               : 'text-[#6C625C]'
                           }`}
                         >
@@ -1489,9 +1851,9 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setGuestDisplayMode('list')}
-                          className={`px-2 py-0.5 rounded-[5px] font-mono-code text-[10px] font-bold cursor-pointer ${
+                          className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[10px] font-bold cursor-pointer whitespace-nowrap ${
                             guestDisplayMode === 'list'
-                              ? 'bg-[#1A0C06] text-[#FBEFE6]'
+                              ? 'bg-[#140905] text-[#FBEFE6]'
                               : 'text-[#6C625C]'
                           }`}
                         >
@@ -1519,7 +1881,7 @@ export default function App() {
                             aria-selected={selectedCategory === cat}
                             data-testid={`subsection-tab-${cat.toLowerCase().replace(/\s+/g, '-')}`}
                             onClick={() => handleSelectSubSection(cat)}
-                            className={`px-2.5 py-1 rounded-[8px] text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                            className={`px-3 py-1.5 rounded-[8px] text-[12px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                               selectedCategory === cat
                                 ? 'bg-[#E8500C] text-[#FBEFE6]'
                                 : 'bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] hover:border-[#1A0C06]'
@@ -1533,33 +1895,35 @@ export default function App() {
                   </div>
 
                   {guestDisplayMode === 'swipe' ? (
-                    <div className="p-3.5 flex flex-col gap-3">
+                    <div className="p-4 flex flex-col gap-3.5">
                       <div className="flex items-center justify-between text-[11px] font-mono-code text-[#6C625C]">
                         <span>
                           {currentDeckDish
-                            ? `Card ${deckIndex + 1} of ${filteredDishes.length} · ${selectedCategory}`
+                            ? `Dish ${deckIndex + 1} of ${filteredDishes.length} · ${selectedCategory}`
                             : `${selectedCategory} Complete`}
                         </span>
-                        <span>← Left: Skip · Right: In Cart →</span>
+                        <span>← Swipe Left: Skip · Right: Add →</span>
                       </div>
 
                       {lastSwipeFeedback && (
-                        <div className="px-3 py-1 rounded-[8px] bg-[#F3ECE5] text-[11px] font-mono-code flex items-center justify-between">
+                        <div className="px-3 py-1.5 rounded-[8px] bg-[#F7F2ED] border border-[#E3D9D3] text-[11px] font-mono-code flex items-center justify-between">
                           <span>
-                            {lastSwipeFeedback.type === 'add' ? '✓ Added to Cart:' : '↷ Skipped:'}{' '}
+                            {lastSwipeFeedback.type === 'add' ? '✓ In Cart:' : '↷ Skipped:'}{' '}
                             <strong>{lastSwipeFeedback.dishName}</strong>
                           </span>
-                          <span className="text-[#6C625C]">Skipped: {skippedIds.length}</span>
+                          <span className="text-[#6C625C] tabular-nums">
+                            Skipped: {skippedIds.length}
+                          </span>
                         </div>
                       )}
 
                       {currentDeckDish ? (
                         <>
-                          <div className="relative h-[300px] w-full select-none">
+                          <div className="relative h-[320px] w-full select-none">
                             {nextDeckDish && (
                               <div
                                 aria-hidden="true"
-                                className="absolute inset-x-3 top-2 bottom-0 rounded-[18px] bg-[#F3ECE5] border border-[#E3D9D3] scale-[0.96] translate-y-2 opacity-70 pointer-events-none"
+                                className="absolute inset-x-3 top-2 bottom-0 rounded-[18px] bg-[#F7F2ED] border border-[#E3D9D3] scale-[0.96] translate-y-2 opacity-75 pointer-events-none"
                               />
                             )}
 
@@ -1576,78 +1940,59 @@ export default function App() {
                                   : 'transform 0.18s cubic-bezier(0.22, 1, 0.36, 1)',
                                 touchAction: 'pan-y',
                               }}
-                              className="relative h-full w-full rounded-[18px] bg-[#FFFFFF] border-2 border-[#1A0C06] overflow-hidden flex flex-col justify-between cursor-grab active:cursor-grabbing"
+                              className="relative h-full w-full rounded-[18px] bg-[#FFFFFF] border border-[#1A0C06]/25 overflow-hidden flex flex-col justify-between cursor-grab active:cursor-grabbing"
                             >
                               {showAddStamp && (
-                                <div className="absolute top-3 left-3 z-20 px-3 py-1 rounded-[8px] bg-[#C4F042] text-[#140905] border-2 border-[#140905] font-mono-code text-[12px] font-bold uppercase tracking-wider">
-                                  IN CART +
+                                <div className="absolute top-3 left-3 z-20 px-3 py-1 rounded-[8px] bg-[#C4F042] text-[#140905] font-mono-code text-[12px] font-bold uppercase tracking-wider">
+                                  ADD TO TABLE +
                                 </div>
                               )}
                               {showSkipStamp && (
-                                <div className="absolute top-3 right-3 z-20 px-3 py-1 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] border-2 border-[#140905] font-mono-code text-[12px] font-bold uppercase tracking-wider">
-                                  SKIPPED ←
+                                <div className="absolute top-3 right-3 z-20 px-3 py-1 rounded-[8px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold uppercase tracking-wider">
+                                  SKIP ←
                                 </div>
                               )}
 
-                              <div className="relative h-[145px] bg-[#140905] overflow-hidden">
-                                {currentDeckDish.imageUrl ? (
-                                  <img
-                                    src={currentDeckDish.imageUrl}
-                                    alt={currentDeckDish.name}
-                                    draggable={false}
-                                    className="w-full h-full object-cover opacity-90 pointer-events-none"
-                                  />
-                                ) : (
-                                  <div
-                                    className="w-full h-full flex items-center justify-center"
-                                    style={{ backgroundColor: currentDeckDish.plateColor }}
-                                  />
-                                )}
-                                <div
-                                  className="absolute inset-0 pointer-events-none"
-                                  style={{
-                                    background:
-                                      'linear-gradient(to top, rgba(20,9,5,0.85) 0%, rgba(20,9,5,0.15) 65%)',
-                                  }}
+                              {/* 4:3 Culinary Photography with Measured Scrim */}
+                              <div className="relative h-[175px] bg-[#140905] overflow-hidden">
+                                <DishPhotoWithFallback
+                                  dish={currentDeckDish}
+                                  className="w-full h-full object-cover pointer-events-none"
                                 />
+                                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent pointer-events-none" />
 
-                                <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between gap-1">
-                                  <span className="px-2 py-0.5 rounded-[6px] bg-[#140905]/85 text-[#FBEFE6] font-mono-code text-[10px] font-semibold">
-                                    {currentDeckDish.category}
-                                  </span>
-                                  <div className="flex items-center gap-1">
-                                    {currentDeckDish.prepTime && (
-                                      <span className="px-2 py-0.5 rounded-[6px] bg-[#140905]/85 text-[#FBEFE6] font-mono-code text-[10px]">
-                                        {currentDeckDish.prepTime}
-                                      </span>
-                                    )}
-                                    <span className="px-2 py-0.5 rounded-[6px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[10px] font-bold">
-                                      {currentDeckDish.dietary}
-                                    </span>
+                                <div className="absolute bottom-3 left-3.5 right-3.5 flex items-end justify-between text-[#FBEFE6]">
+                                  <div className="pr-2">
+                                    <div className="text-[11px] text-[#FBEFE6]/80 font-mono-code">
+                                      {currentDeckDish.category} · {currentDeckDish.dietary}
+                                      {currentDeckDish.prepTime
+                                        ? ` · ${currentDeckDish.prepTime}`
+                                        : ''}
+                                    </div>
+                                    <h4 className="text-[17px] font-bold leading-snug m-0 mt-0.5">
+                                      {currentDeckDish.name}
+                                    </h4>
                                   </div>
-                                </div>
-
-                                <div className="absolute bottom-2.5 left-3 right-3 flex items-end justify-between text-[#FBEFE6]">
-                                  <h4 className="text-[16px] font-bold leading-snug m-0 pr-2">
-                                    {currentDeckDish.name}
-                                  </h4>
-                                  <span className="font-mono-code text-[16px] font-bold text-[#C4F042] shrink-0 tabular-nums">
+                                  <span className="font-mono-code text-[18px] font-bold text-[#C4F042] shrink-0 tabular-nums">
                                     {state.currencySymbol}
                                     {currentDeckDish.price}
                                   </span>
                                 </div>
                               </div>
 
+                              {/* Editorial Dish Description & In-Cart Status */}
                               <div className="p-3.5 flex-1 flex flex-col justify-between bg-[#FFFFFF]">
-                                <p className="text-[12px] text-[#6C625C] leading-relaxed m-0 line-clamp-2">
+                                <p className="text-[13px] text-[#6C625C] leading-relaxed m-0 line-clamp-2">
                                   {currentDeckDish.description}
                                 </p>
 
-                                <div className="flex items-center justify-between pt-2 border-t border-[#E3D9D3] text-[11px] font-mono-code">
-                                  <span className="text-[#6C625C]">Drag card left or right</span>
+                                <div className="flex items-center justify-between pt-2.5 border-t border-[#E3D9D3] text-[11px] font-mono-code">
+                                  <span className="text-[#6C625C]">
+                                    Drag card or tap below
+                                  </span>
                                   {state.cart.find((c) => c.dish.id === currentDeckDish.id) ? (
-                                    <span className="px-2 py-0.5 rounded bg-[#FFEEE3] text-[#C03E0A] font-bold">
-                                      In Cart:{' '}
+                                    <span className="text-[#C03E0A] font-bold tabular-nums">
+                                      In Table Tray:{' '}
                                       {
                                         state.cart.find((c) => c.dish.id === currentDeckDish.id)
                                           ?.qty
@@ -1655,7 +2000,7 @@ export default function App() {
                                     </span>
                                   ) : (
                                     <span className="text-[#1A0C06] font-semibold">
-                                      Not in cart yet
+                                      Swipe right to pick
                                     </span>
                                   )}
                                 </div>
@@ -1663,14 +2008,15 @@ export default function App() {
                             </div>
                           </div>
 
+                          {/* Tactile Swipe Controls */}
                           <div className="grid grid-cols-7 gap-2 pt-1">
                             <button
                               type="button"
                               data-testid="swipe-left-skip-btn"
                               onClick={() => triggerSwipeAction('left')}
-                              className="col-span-3 h-10 rounded-[10px] bg-[#F3ECE5] hover:bg-[#E3D9D3] border border-[#1A0C06]/20 text-[#1A0C06] font-mono-code text-[11px] font-bold cursor-pointer transition-colors"
+                              className="col-span-3 h-11 rounded-[10px] bg-[#F7F2ED] hover:bg-[#E3D9D3] border border-[#E3D9D3] text-[#1A0C06] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap"
                             >
-                              ← Swipe Left (Skip)
+                              ← Skip Dish
                             </button>
 
                             <button
@@ -1679,7 +2025,7 @@ export default function App() {
                               onClick={handleUndoSwipe}
                               disabled={swipeHistory.length === 0}
                               title="Undo last swipe"
-                              className="col-span-1 h-10 rounded-[10px] bg-[#FFFFFF] border border-[#E3D9D3] disabled:opacity-40 text-[#1A0C06] font-mono-code text-[11px] font-bold cursor-pointer"
+                              className="col-span-1 h-11 rounded-[10px] bg-[#FFFFFF] border border-[#E3D9D3] disabled:opacity-40 text-[#1A0C06] font-mono-code text-[12px] font-bold cursor-pointer"
                             >
                               ↺
                             </button>
@@ -1688,24 +2034,22 @@ export default function App() {
                               type="button"
                               data-testid="swipe-right-add-btn"
                               onClick={() => triggerSwipeAction('right')}
-                              className="col-span-3 h-10 rounded-[10px] bg-[#1A0C06] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer transition-colors"
+                              className="col-span-3 h-11 rounded-[10px] bg-[#140905] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap"
                             >
-                              {state.serviceLevel >= 2
-                                ? 'Swipe Right (Cart +) →'
-                                : 'Next Card →'}
+                              {state.serviceLevel >= 2 ? 'Add to Cart + →' : 'Next Dish →'}
                             </button>
                           </div>
                         </>
                       ) : (
                         <div
                           data-testid="swipe-deck-complete"
-                          className="p-5 rounded-[18px] bg-[#F7F2ED] border-2 border-[#1A0C06] text-center flex flex-col items-center gap-3"
+                          className="p-5 rounded-[18px] bg-[#F7F2ED] border border-[#E3D9D3] text-center flex flex-col items-center gap-3"
                         >
-                          <span className="px-2.5 py-0.5 rounded-[6px] bg-[#C4F042] text-[#140905] font-mono-code text-[10px] font-bold uppercase">
-                            DONE PICKING · {selectedCategory}
-                          </span>
+                          <div className="font-mono-code text-[11px] font-bold uppercase text-[#C03E0A]">
+                            Done Picking · {selectedCategory}
+                          </div>
                           <h4 className="text-[17px] font-bold text-[#1A0C06] m-0">
-                            You swiped through all dishes in {selectedCategory}!
+                            You explored all dishes in {selectedCategory}
                           </h4>
                           <p className="text-[12px] text-[#6C625C] m-0">
                             Picked <strong>{cartCount} items</strong> ({state.currencySymbol}
@@ -1721,10 +2065,9 @@ export default function App() {
                                   soundFX.play('tap');
                                   setGuestStep('cart');
                                 }}
-                                className="w-full h-10 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[12px] font-bold uppercase cursor-pointer"
+                                className="w-full h-11 rounded-[10px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code text-[12px] font-bold uppercase cursor-pointer"
                               >
-                                Done Picking · Click Cart ({cartCount} items ·{' '}
-                                {state.currencySymbol}
+                                Done Picking · Open Cart ({cartCount} · {state.currencySymbol}
                                 {cartTotal}) →
                               </button>
                             )}
@@ -1734,16 +2077,17 @@ export default function App() {
                                 setDeckIndex(0);
                                 setSwipeHistory([]);
                               }}
-                              className="w-full h-9 rounded-[10px] bg-[#FFFFFF] border border-[#1A0C06] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer"
+                              className="w-full h-10 rounded-[10px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] font-mono-code text-[11px] font-semibold cursor-pointer"
                             >
-                              ↺ Swipe {selectedCategory} Deck Again
+                              ↺ Browse {selectedCategory} Again
                             </button>
                           </div>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="p-3.5 flex flex-col gap-2.5 max-h-[340px] overflow-y-auto">
+                    /* List Mode Alternative */
+                    <div className="p-4 flex flex-col gap-2.5 max-h-[360px] overflow-y-auto">
                       {filteredDishes.map((dish) => {
                         const inCart = state.cart.find((c) => c.dish.id === dish.id);
                         return (
@@ -1751,16 +2095,21 @@ export default function App() {
                             key={dish.id}
                             className="p-3 rounded-[14px] border border-[#E3D9D3] bg-[#F7F2ED]/60 flex items-center justify-between gap-3"
                           >
-                            <div className="min-w-0">
-                              <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
-                                {dish.name}
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-12 h-12 rounded-[8px] overflow-hidden bg-[#140905] shrink-0">
+                                <DishPhotoWithFallback dish={dish} />
                               </div>
-                              <div className="text-[11px] text-[#6C625C] truncate">
-                                {dish.category} · {dish.description}
-                              </div>
-                              <div className="font-mono-code text-[12px] font-bold text-[#1A0C06] mt-0.5 tabular-nums">
-                                {state.currencySymbol}
-                                {dish.price}
+                              <div className="min-w-0">
+                                <div className="font-semibold text-[13px] text-[#1A0C06] truncate">
+                                  {dish.name}
+                                </div>
+                                <div className="text-[11px] text-[#6C625C] truncate">
+                                  {dish.category} · {dish.description}
+                                </div>
+                                <div className="font-mono-code text-[12px] font-bold text-[#1A0C06] mt-0.5 tabular-nums">
+                                  {state.currencySymbol}
+                                  {dish.price}
+                                </div>
                               </div>
                             </div>
 
@@ -1771,9 +2120,9 @@ export default function App() {
                                     <button
                                       type="button"
                                       onClick={() => handleRemoveFromCart(dish.id)}
-                                      className="w-7 h-7 rounded-[8px] bg-[#F3ECE5] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
+                                      className="w-7 h-7 rounded-[8px] bg-[#FFFFFF] border border-[#E3D9D3] text-[#1A0C06] font-bold text-[14px] cursor-pointer"
                                     >
-                                      -
+                                      −
                                     </button>
                                     <span className="font-mono-code text-[12px] font-bold w-4 text-center tabular-nums">
                                       {inCart.qty}
@@ -1783,7 +2132,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => handleAddToCart(dish)}
-                                  className="px-2.5 h-7 rounded-[8px] bg-[#1A0C06] hover:bg-[#E8500C] text-[#FBEFE6] font-semibold text-[12px] cursor-pointer transition-colors"
+                                  className="px-2.5 h-7 rounded-[8px] bg-[#140905] hover:bg-[#E8500C] text-[#FBEFE6] font-semibold text-[12px] cursor-pointer transition-colors"
                                 >
                                   +
                                 </button>
@@ -1795,11 +2144,11 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Guest Sticky Bottom Bar */}
-                  <div className="p-3.5 bg-[#F7F2ED] border-t border-[#E3D9D3] flex flex-col gap-2">
+                  {/* Guest Bottom Table Tray */}
+                  <div className="p-4 bg-[#F7F2ED] border-t border-[#E3D9D3] flex flex-col gap-2">
                     {state.serviceLevel === 1 ? (
                       <div className="flex items-center justify-between text-[12px] text-[#6C625C]">
-                        <span>Level 1 · Browse-Only Swipe Deck</span>
+                        <span>Level 1 · Digital Browse Menu</span>
                         <span className="font-mono-code">Switch to L2 / L3 for Cart</span>
                       </div>
                     ) : (
@@ -1810,10 +2159,10 @@ export default function App() {
                           soundFX.play('tap');
                           setGuestStep('cart');
                         }}
-                        className="w-full h-11 rounded-[12px] bg-[#E8500C] hover:bg-[#C03E0A] text-[#FBEFE6] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer transition-colors flex items-center justify-between px-4"
+                        className="w-full h-12 rounded-[12px] bg-[#140905] hover:bg-[#E8500C] text-[#FBEFE6] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer transition-colors flex items-center justify-between px-4"
                       >
                         <span>Done Picking · Click Cart ({cartCount})</span>
-                        <span className="tabular-nums">
+                        <span className="text-[#C4F042] tabular-nums">
                           {state.currencySymbol}
                           {cartTotal} →
                         </span>
@@ -1826,8 +2175,8 @@ export default function App() {
           )}
 
           {/* =====================================================================
-              SURFACE 2: WAITER STAFF APP (com.buildbros.waiter)
-              Full-bleed mobile design, live Pass Pickup + Table Calls + Native Push
+              SURFACE 2: WAITER HANDHELD APP (com.buildbros.waiter)
+              Unified Priority Queue (Ready Pass Pickups + Table Calls) + Floor Map
              ===================================================================== */}
           {(view === 'split-suite' || view === 'waiter-apk') && (
             <section
@@ -1835,20 +2184,17 @@ export default function App() {
               className={`bg-[#140905] text-[#FBEFE6] overflow-hidden flex flex-col ${
                 DEDICATED_APK_ROLE
                   ? 'min-h-screen border-0'
-                  : 'rounded-[24px] border-2 border-[#2A180D]'
+                  : 'rounded-[22px] border border-[#2A180D]'
               }`}
               data-testid="surface-waiter-apk"
             >
               {/* Waiter App Top Header */}
-              <div className="bg-[#1A0C06] px-4 py-3.5 border-b border-[#FBEFE6]/12 flex items-center justify-between gap-2">
+              <div className="bg-[#1A0C06] px-4 py-4 border-b border-[#2A180D] flex items-center justify-between gap-3">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-[#C4F042]" />
-                    <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042] tracking-wider">
-                      WAITER HANDHELD · LIVE SYNC
-                    </span>
+                  <div className="font-mono-code text-[11px] text-[#C4F042]">
+                    Waiter Handheld · Live OTA v{state.otaVersion || 240}
                   </div>
-                  <h3 className="text-[17px] font-bold text-[#FBEFE6] m-0 mt-0.5">
+                  <h3 className="text-[18px] font-bold text-[#FBEFE6] m-0 mt-0.5">
                     {state.venueName}
                   </h3>
                 </div>
@@ -1859,28 +2205,41 @@ export default function App() {
                   onClick={() => {
                     soundFX.play('kitchenReady');
                     triggerUrgentDeviceNotification(
-                      'TEST ALERT · Waiter Handheld Active',
-                      'Android system notification, audio chime & vibration verified.'
+                      'Waiter Handheld Alert Verified',
+                      'Android status-bar notification, chime & haptic vibration active.'
                     );
                     setLiveToast({
-                      title: 'Waiter Push Notification Active',
-                      body: 'Vibration & sound chime verified on this phone.',
+                      title: 'Waiter Push Alert Verified',
+                      body: 'Audio chime and native notification active on this device.',
                     });
                     window.setTimeout(() => setLiveToast(null), 3500);
                   }}
-                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#C4F042] hover:text-[#FFFFFF] font-mono-code text-[11px] font-bold cursor-pointer transition-colors shrink-0"
+                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#C4F042] hover:text-[#FFFFFF] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap shrink-0"
                 >
-                  Test Push Alert
+                  Test Alert
                 </button>
               </div>
 
-              {/* 3 Large, High-Contrast Staff Navigation Tabs */}
-              <div className="p-2.5 bg-[#1A0C06] border-b border-[#FBEFE6]/10 grid grid-cols-3 gap-2">
+              {/* 4 Staff Navigation Tabs (Unified Queue + Pass Pickup + Calls + Floor) */}
+              <div className="p-2.5 bg-[#1A0C06] border-b border-[#2A180D] grid grid-cols-4 gap-1.5">
+                <button
+                  type="button"
+                  data-testid="waiter-tab-queue"
+                  onClick={() => setWaiterTab('queue')}
+                  className={`py-2 px-2 rounded-[8px] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap ${
+                    waiterTab === 'queue'
+                      ? 'bg-[#FBEFE6] text-[#140905]'
+                      : 'bg-[#2A180D] text-[#FBEFE6]/80'
+                  }`}
+                >
+                  Queue ({readyOrders.length + pendingCalls.length})
+                </button>
+
                 <button
                   type="button"
                   data-testid="waiter-tab-pickup"
                   onClick={() => setWaiterTab('pickup')}
-                  className={`py-2.5 px-2 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer transition-colors flex items-center justify-center gap-1.5 ${
+                  className={`py-2 px-2 rounded-[8px] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap ${
                     waiterTab === 'pickup'
                       ? 'bg-[#C4F042] text-[#140905]'
                       : readyOrders.length > 0
@@ -1888,17 +2247,14 @@ export default function App() {
                       : 'bg-[#2A180D] text-[#FBEFE6]/75'
                   }`}
                 >
-                  <span>Pass Pickup</span>
-                  <span className="px-1.5 py-0.5 rounded bg-black/25 text-[11px]">
-                    {readyOrders.length}
-                  </span>
+                  Pickup ({readyOrders.length})
                 </button>
 
                 <button
                   type="button"
                   data-testid="waiter-tab-calls"
                   onClick={() => setWaiterTab('calls')}
-                  className={`py-2.5 px-2 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer transition-colors flex items-center justify-center gap-1.5 ${
+                  className={`py-2 px-2 rounded-[8px] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap ${
                     waiterTab === 'calls'
                       ? 'bg-[#E8500C] text-[#FBEFE6]'
                       : pendingCalls.length > 0
@@ -1906,17 +2262,14 @@ export default function App() {
                       : 'bg-[#2A180D] text-[#FBEFE6]/75'
                   }`}
                 >
-                  <span>Table Calls</span>
-                  <span className="px-1.5 py-0.5 rounded bg-black/25 text-[11px]">
-                    {pendingCalls.length}
-                  </span>
+                  Calls ({pendingCalls.length})
                 </button>
 
                 <button
                   type="button"
                   data-testid="waiter-tab-floor"
                   onClick={() => setWaiterTab('floor')}
-                  className={`py-2.5 px-2 rounded-[10px] font-mono-code text-[12px] font-bold cursor-pointer transition-colors ${
+                  className={`py-2 px-2 rounded-[8px] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap ${
                     waiterTab === 'floor'
                       ? 'bg-[#FBEFE6] text-[#140905]'
                       : 'bg-[#2A180D] text-[#FBEFE6]/75'
@@ -1926,67 +2279,38 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Waiter Content Area */}
-              <div className="p-4 flex-1 flex flex-col gap-3">
-                {/* Cross-Tab Urgent Banner so Waiter NEVER misses a Ready Pickup or Table Call */}
-                {waiterTab !== 'pickup' && readyOrders.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setWaiterTab('pickup')}
-                    className="w-full p-3 rounded-[12px] bg-[#C4F042] text-[#140905] font-mono-code text-[12px] font-bold flex items-center justify-between cursor-pointer"
-                  >
-                    <span>
-                      ● {readyOrders.length} ORDER{readyOrders.length > 1 ? 'S' : ''} READY AT
-                      KITCHEN PASS!
-                    </span>
-                    <span>View Pickup →</span>
-                  </button>
-                )}
-
-                {waiterTab !== 'calls' && pendingCalls.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setWaiterTab('calls')}
-                    className="w-full p-3 rounded-[12px] bg-[#E8500C] text-[#FBEFE6] font-mono-code text-[12px] font-bold flex items-center justify-between cursor-pointer"
-                  >
-                    <span>
-                      ● {pendingCalls.length} TABLE CALL{pendingCalls.length > 1 ? 'S' : ''}{' '}
-                      WAITING!
-                    </span>
-                    <span>View Calls →</span>
-                  </button>
-                )}
-
-                {/* TAB 1: KITCHEN PASS PICKUP (Ready Orders from Kitchen KDS) */}
-                {waiterTab === 'pickup' && (
+              {/* Waiter Body */}
+              <div className="p-4 flex-1 flex flex-col gap-3.5">
+                {/* KITCHEN PASS PICKUP CARDS (Shown in both 'queue' and 'pickup') */}
+                {(waiterTab === 'queue' || waiterTab === 'pickup') && (
                   <div className="flex flex-col gap-3" data-testid="waiter-pickup-list">
+                    <div className="flex items-center justify-between text-[11px] font-mono-code text-[#C4F042]">
+                      <span>Kitchen Pass Pickup ({readyOrders.length} Ready)</span>
+                      <span>Priority 1</span>
+                    </div>
+
                     {readyOrders.length === 0 ? (
-                      <div className="p-6 rounded-[16px] bg-[#1A0C06] border border-[#FBEFE6]/10 text-center flex flex-col items-center gap-2">
-                        <div className="font-semibold text-[14px] text-[#FBEFE6]">
-                          No dishes waiting at the kitchen pass right now.
-                        </div>
-                        <p className="text-[12px] text-[#FBEFE6]/65 m-0 max-w-[320px]">
-                          As soon as Kitchen KDS marks a ticket <strong>READY</strong>, it pops up
-                          here with an audio chime and phone notification.
-                        </p>
+                      <div className="p-4 rounded-[14px] bg-[#1A0C06] border border-[#2A180D] text-[12px] text-[#FBEFE6]/70">
+                        No dishes waiting at the kitchen pass right now. When Kitchen marks a
+                        ticket Ready, it appears here immediately.
                       </div>
                     ) : (
                       readyOrders.map((ord) => (
                         <div
                           key={ord.id}
                           data-testid={`waiter-ready-ticket-${ord.ticketNumber.replace('#', '')}`}
-                          className="p-4 rounded-[16px] bg-[#2A180D] border-2 border-[#C4F042] flex flex-col gap-3"
+                          className="p-4 rounded-[16px] bg-[#23140B] border-2 border-[#C4F042] flex flex-col gap-3"
                         >
                           <div className="flex items-center justify-between">
                             <div>
-                              <span className="px-2 py-0.5 rounded bg-[#C4F042] text-[#140905] font-mono-code text-[10px] font-bold uppercase">
-                                READY AT KITCHEN PASS
-                              </span>
-                              <div className="font-mono-code font-bold text-[18px] text-[#FFFFFF] mt-1">
+                              <div className="font-mono-code text-[11px] font-bold text-[#C4F042]">
+                                Ready at Kitchen Pass · Pickup Now
+                              </div>
+                              <div className="font-mono-code font-bold text-[18px] text-[#FFFFFF] mt-0.5 tabular-nums">
                                 {ord.ticketNumber} · Table {ord.tableNumber}
                               </div>
                             </div>
-                            <span className="font-mono-code text-[13px] font-bold text-[#C4F042]">
+                            <span className="font-mono-code text-[14px] font-bold text-[#C4F042] tabular-nums">
                               {state.currencySymbol}
                               {ord.totalAmount}
                             </span>
@@ -1999,7 +2323,7 @@ export default function App() {
                                   <strong className="text-[#C4F042]">{i.qty}×</strong>{' '}
                                   {i.dish.name}
                                 </span>
-                                <span className="font-mono-code text-[#FBEFE6]/70">
+                                <span className="font-mono-code text-[#FBEFE6]/70 tabular-nums">
                                   {state.currencySymbol}
                                   {i.dish.price * i.qty}
                                 </span>
@@ -2011,9 +2335,9 @@ export default function App() {
                             type="button"
                             data-testid={`waiter-serve-${ord.ticketNumber.replace('#', '')}-btn`}
                             onClick={() => handleWaiterServeOrder(ord.id)}
-                            className="w-full h-11 rounded-[10px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] font-mono-code font-bold text-[13px] uppercase tracking-wider cursor-pointer"
+                            className="w-full h-11 rounded-[10px] bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer"
                           >
-                            ✓ Mark Served at Table {ord.tableNumber}
+                            ✓ Deliver &amp; Mark Served at Table {ord.tableNumber}
                           </button>
                         </div>
                       ))
@@ -2021,37 +2345,42 @@ export default function App() {
                   </div>
                 )}
 
-                {/* TAB 2: TABLE CALLS */}
-                {waiterTab === 'calls' && (
+                {/* TABLE CALLS CARDS (Shown in both 'queue' and 'calls') */}
+                {(waiterTab === 'queue' || waiterTab === 'calls') && (
                   <div className="flex flex-col gap-3" data-testid="waiter-calls-list">
+                    <div className="flex items-center justify-between text-[11px] font-mono-code text-[#FF8741]">
+                      <span>Guest Table Calls ({pendingCalls.length} Active)</span>
+                      <span>Level 2 Assisted</span>
+                    </div>
+
                     {state.waiterCalls.length === 0 ? (
-                      <div className="p-6 rounded-[16px] bg-[#1A0C06] border border-[#FBEFE6]/10 text-center text-[13px] text-[#FBEFE6]/65">
+                      <div className="p-4 rounded-[14px] bg-[#1A0C06] border border-[#2A180D] text-[12px] text-[#FBEFE6]/70">
                         No active waiter calls right now.
                       </div>
                     ) : (
                       state.waiterCalls.map((call) => (
                         <div
                           key={call.id}
-                          className={`p-4 rounded-[16px] border-2 flex flex-col gap-2.5 ${
+                          className={`p-4 rounded-[16px] border flex flex-col gap-2.5 ${
                             call.status === 'pending'
                               ? 'bg-[#2A180D] border-[#E8500C]'
-                              : 'bg-[#1A0C06] border-[#FBEFE6]/15'
+                              : 'bg-[#1A0C06] border-[#2A180D]'
                           }`}
                         >
                           <div className="flex items-center justify-between">
-                            <span className="font-bold text-[17px]">
-                              Table {call.tableNumber}
-                            </span>
-                            <span
-                              className={`px-2.5 py-0.5 rounded-[6px] font-mono-code text-[10px] font-bold uppercase ${
-                                call.status === 'pending'
-                                  ? 'bg-[#E8500C] text-[#FBEFE6]'
-                                  : 'bg-[#140905] text-[#C4F042]'
-                              }`}
-                            >
-                              {call.status === 'pending'
-                                ? 'URGENT · NEEDS WAITER'
-                                : '✓ ON MY WAY'}
+                            <div>
+                              <div className="font-mono-code text-[11px] text-[#FF8741]">
+                                {call.status === 'pending'
+                                  ? 'Guest Calling Waiter'
+                                  : 'Claimed · Walking to Table'}
+                              </div>
+                              <div className="font-bold text-[17px] mt-0.5">
+                                Table {call.tableNumber}
+                              </div>
+                            </div>
+                            <span className="font-mono-code text-[13px] font-bold text-[#C4F042] tabular-nums">
+                              {state.currencySymbol}
+                              {call.cartTotal}
                             </span>
                           </div>
 
@@ -2063,19 +2392,27 @@ export default function App() {
                               : 'Guest requested waiter assistance at table'}
                           </div>
 
-                          <div className="flex items-center justify-between pt-1">
-                            <span className="font-mono-code text-[13px] font-bold text-[#C4F042] tabular-nums">
-                              Cart Total: {state.currencySymbol}
-                              {call.cartTotal}
-                            </span>
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
                             {call.status === 'pending' && (
                               <button
                                 type="button"
                                 data-testid={`waiter-ack-${call.tableNumber}-btn`}
                                 onClick={() => handleWaiterAcknowledge(call.id)}
-                                className="px-4 py-2 rounded-[10px] bg-[#C4F042] text-[#140905] font-mono-code font-bold text-[12px] uppercase cursor-pointer"
+                                className="flex-1 h-10 px-3 rounded-[10px] bg-[#C4F042] text-[#140905] font-mono-code font-bold text-[11px] uppercase cursor-pointer whitespace-nowrap"
                               >
                                 On My Way →
+                              </button>
+                            )}
+                            {call.cartSnapshot.length > 0 && call.status !== 'completed' && (
+                              <button
+                                type="button"
+                                data-testid={`waiter-send-call-order-${call.tableNumber}-btn`}
+                                onClick={() =>
+                                  handlePlaceAssistedOrder(call.tableNumber, call.cartSnapshot)
+                                }
+                                className="flex-1 h-10 px-3 rounded-[10px] bg-[#E8500C] text-[#FBEFE6] font-mono-code font-bold text-[11px] uppercase cursor-pointer whitespace-nowrap"
+                              >
+                                Send Cart to Kitchen →
                               </button>
                             )}
                           </div>
@@ -2085,33 +2422,23 @@ export default function App() {
                   </div>
                 )}
 
-                {/* TAB 3: FLOOR MAP */}
+                {/* FLOOR MAP & ASSISTED ORDER PAD IN WAITER APP */}
                 {waiterTab === 'floor' && (
-                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
-                    {state.tables.map((t) => (
-                      <button
-                        key={t.tableNumber}
-                        type="button"
-                        onClick={() =>
-                          setState((prev) => ({ ...prev, activeTable: t.tableNumber }))
-                        }
-                        className={`p-3 rounded-[12px] border text-left cursor-pointer ${
-                          t.status === 'ready'
-                            ? 'bg-[#2A180D] border-[#C4F042] text-[#C4F042]'
-                            : t.status === 'waiter_called'
-                            ? 'bg-[#2A180D] border-[#E8500C] text-[#FF8741]'
-                            : 'bg-[#1A0C06] border-[#FBEFE6]/15 text-[#FBEFE6]'
-                        }`}
-                      >
-                        <div className="font-mono-code font-bold text-[14px]">
-                          Table {t.tableNumber}
-                        </div>
-                        <div className="text-[11px] capitalize mt-0.5 opacity-90">
-                          {t.status.replace('_', ' ')}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
+                  <TopDownFloorMap
+                    tables={state.tables}
+                    activeTable={state.activeTable}
+                    currencySymbol={state.currencySymbol}
+                    orders={state.orders}
+                    waiterCalls={state.waiterCalls}
+                    dishes={state.dishes}
+                    darkTheme
+                    onSelectTable={(tableNumber) =>
+                      setState((prev) => ({ ...prev, activeTable: tableNumber }))
+                    }
+                    onAcknowledgeCall={handleWaiterAcknowledge}
+                    onServeOrder={handleWaiterServeOrder}
+                    onPlaceAssistedOrder={handlePlaceAssistedOrder}
+                  />
                 )}
               </div>
             </section>
@@ -2119,7 +2446,7 @@ export default function App() {
 
           {/* =====================================================================
               SURFACE 3: KITCHEN & RECEPTION KDS APP (com.buildbros.kitchen)
-              Direct 4-Stage KDS Board — Tapping READY alerts Waiter App live!
+              Direct 4-Stage KDS Board + Interactive Dish Prep Checklist
              ===================================================================== */}
           {(view === 'split-suite' || view === 'kitchen-apk') && (
             <section
@@ -2127,21 +2454,17 @@ export default function App() {
               className={`bg-[#FFFFFF] text-[#1A0C06] overflow-hidden flex flex-col ${
                 DEDICATED_APK_ROLE
                   ? 'min-h-screen border-0'
-                  : 'rounded-[24px] border-2 border-[#1A0C06]'
+                  : 'rounded-[22px] border border-[#E3D9D3]'
               }`}
               data-testid="surface-kitchen-apk"
             >
-              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-3.5 border-b border-[#2A180D] flex items-center justify-between gap-2">
+              <div className="bg-[#140905] text-[#FBEFE6] px-4 py-4 border-b border-[#2A180D] flex items-center justify-between gap-3">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-[#C4F042]" />
-                    <span className="font-mono-code text-[10px] font-bold uppercase text-[#C4F042]">
-                      KITCHEN &amp; RECEPTION KDS
-                    </span>
+                  <div className="font-mono-code text-[11px] text-[#C4F042]">
+                    Kitchen Pass KDS · {activeKitchenOrders.length} Active Tickets
                   </div>
-                  <h3 className="text-[17px] font-bold text-[#FBEFE6] m-0 mt-0.5">
-                    Live Ticket Board ({state.orders.filter((o) => o.status !== 'served').length}{' '}
-                    Active)
+                  <h3 className="text-[18px] font-bold text-[#FBEFE6] m-0 mt-0.5">
+                    4-Stage Culinary Pass
                   </h3>
                 </div>
 
@@ -2149,13 +2472,13 @@ export default function App() {
                   type="button"
                   data-testid="kitchen-spawn-ticket-btn"
                   onClick={handleSpawnFreshKitchenTicket}
-                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#C4F042] hover:text-[#FFFFFF] font-mono-code text-[11px] font-bold cursor-pointer transition-colors shrink-0"
+                  className="px-3 py-1.5 rounded-[8px] bg-[#2A180D] hover:bg-[#E8500C] text-[#C4F042] hover:text-[#FFFFFF] font-mono-code text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap shrink-0"
                 >
                   + New Test Ticket
                 </button>
               </div>
 
-              <div className="p-4 flex-1 flex flex-col gap-3.5">
+              <div className="p-4 flex-1 flex flex-col gap-4">
                 {state.orders.map((ord) => {
                   const stages: Array<KitchenOrder['status']> = [
                     'new',
@@ -2163,41 +2486,35 @@ export default function App() {
                     'ready',
                     'served',
                   ];
+                  const checkedIds = ord.checkedItemIds || [];
                   return (
                     <div
                       key={ord.id}
                       data-testid={`kitchen-ticket-${ord.ticketNumber.replace('#', '')}`}
-                      className={`p-4 rounded-[18px] border-2 flex flex-col gap-3 ${
+                      className={`p-4 rounded-[18px] border flex flex-col gap-3 ${
                         ord.status === 'ready'
-                          ? 'bg-[#F7F2ED] border-[#140905]'
+                          ? 'bg-[#F4FCE3] border-[#84CC16]'
                           : ord.status === 'served'
                           ? 'bg-[#F3ECE5]/60 border-[#E3D9D3] opacity-65'
-                          : 'bg-[#F7F2ED] border-[#E8500C]'
+                          : 'bg-[#F7F2ED] border-[#E3D9D3]'
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono-code font-bold text-[18px] text-[#140905]">
+                        <div>
+                          <div className="font-mono-code text-[11px] text-[#6C625C] tabular-nums">
+                            Table {ord.tableNumber} · {ord.createdAt}
+                          </div>
+                          <div className="font-mono-code font-bold text-[19px] text-[#140905] tabular-nums">
                             {ord.ticketNumber}
-                          </span>
-                          <span className="px-2.5 py-0.5 rounded-[6px] bg-[#140905] text-[#FBEFE6] font-mono-code text-[12px] font-bold">
-                            Table {ord.tableNumber}
-                          </span>
+                          </div>
                         </div>
-                        <span
-                          className={`px-2.5 py-1 rounded-[6px] font-mono-code text-[11px] font-bold uppercase ${
-                            ord.status === 'ready'
-                              ? 'bg-[#C4F042] text-[#140905]'
-                              : ord.status === 'served'
-                              ? 'bg-[#E3D9D3] text-[#6C625C]'
-                              : 'bg-[#E8500C] text-[#FBEFE6]'
-                          }`}
-                        >
+
+                        <span className="font-mono-code text-[12px] font-bold uppercase text-[#C03E0A]">
                           {ord.status}
                         </span>
                       </div>
 
-                      {/* Interactive 4-Stage KDS Selector Buttons (Tap any stage directly!) */}
+                      {/* Direct 4-Stage KDS Selector Buttons */}
                       <div
                         className="grid grid-cols-4 gap-1.5"
                         role="group"
@@ -2222,19 +2539,41 @@ export default function App() {
                         ))}
                       </div>
 
+                      {/* Interactive Dish Prep Checklist (Tap to check off plated dishes) */}
                       <div className="p-3 rounded-[12px] bg-[#FFFFFF] border border-[#E3D9D3] flex flex-col gap-1.5 text-[13px]">
-                        {ord.items.map((item) => (
-                          <div key={item.dish.id} className="flex justify-between font-semibold">
-                            <span>
-                              <strong className="text-[#C03E0A]">{item.qty}×</strong>{' '}
-                              {item.dish.name}
-                            </span>
-                            <span className="font-mono-code text-[#6C625C] tabular-nums">
-                              {state.currencySymbol}
-                              {item.dish.price * item.qty}
-                            </span>
+                        {ord.items.map((item) => {
+                          const isChecked = checkedIds.includes(item.dish.id);
+                          return (
+                            <button
+                              key={item.dish.id}
+                              type="button"
+                              onClick={() =>
+                                handleKitchenToggleItemCheck(ord.id, item.dish.id)
+                              }
+                              className="w-full flex items-center justify-between text-left py-1 cursor-pointer hover:opacity-80"
+                            >
+                              <span
+                                className={`font-semibold ${
+                                  isChecked ? 'line-through text-[#6C625C]' : 'text-[#1A0C06]'
+                                }`}
+                              >
+                                <strong className="text-[#C03E0A] font-mono-code mr-1">
+                                  {isChecked ? '✓' : `${item.qty}×`}
+                                </strong>{' '}
+                                {item.dish.name}
+                              </span>
+                              <span className="font-mono-code text-[12px] text-[#6C625C] tabular-nums">
+                                {state.currencySymbol}
+                                {item.dish.price * item.qty}
+                              </span>
+                            </button>
+                          );
+                        })}
+                        {ord.notes && (
+                          <div className="pt-1.5 mt-1 border-t border-[#E3D9D3] text-[11px] text-[#C03E0A] font-medium">
+                            Note: {ord.notes}
                           </div>
-                        ))}
+                        )}
                       </div>
 
                       {!ord.receptionConfirmed && ord.status === 'incoming' ? (
@@ -2253,14 +2592,14 @@ export default function App() {
                           onClick={() => handleKitchenAdvance(ord.id)}
                           className={`w-full h-11 rounded-[10px] font-mono-code font-bold text-[12px] uppercase tracking-wider cursor-pointer transition-colors ${
                             ord.status === 'cooking'
-                              ? 'bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] border-2 border-[#140905]'
+                              ? 'bg-[#C4F042] hover:bg-[#b2df2f] text-[#140905] border border-[#140905]'
                               : 'bg-[#140905] hover:bg-[#E8500C] text-[#FBEFE6]'
                           }`}
                         >
                           {ord.status === 'new'
                             ? `Start Cooking ${ord.ticketNumber} →`
                             : ord.status === 'cooking'
-                            ? `🔔 Mark Dish Ready (Alert Waiter App) →`
+                            ? `Mark Dish Ready (Alert Waiter App) →`
                             : `✓ Mark Served at Table ${ord.tableNumber}`}
                         </button>
                       ) : (
