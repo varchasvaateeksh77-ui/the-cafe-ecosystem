@@ -1,8 +1,6 @@
 {
-  "otaVersion": 1794567761,
-  "minAppVersion": "1.0.0",
-  "updatedAt": "2026-11-13T11:02:41.589Z",
-  "notes": "Full daylight editorial UI redesign, explicit Waiter Shift Wake Lock prompt, and zero-poll low-battery WebSocket push sync",
-  "bundleUrl": "https://raw.githubusercontent.com/varchasvaateeksh77-ui/the-cafe-ecosystem/main/ota/bundle.js",
-  "cssUrl": "https://raw.githubusercontent.com/varchasvaateeksh77-ui/the-cafe-ecosystem/main/ota/bundle.css"
+  "otaVersion": 1794567811,
+  "releaseChannel": "production-live",
+  "updatedAt": "2026-11-13T11:03:31Z",
+  "notes": "Automated Over-The-Air (OTA) Live Bundle Push"
 }
